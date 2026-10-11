@@ -4,6 +4,13 @@ from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def get_default_temp_dir() -> str:
+    # If running inside Botkeep container where /home/container exists
+    if os.path.isdir("/home/container"):
+        return "/home/container/downloads_temp"
+    return "downloads_temp"
+
+
 class Settings(BaseSettings):
     # Server settings
     # Botkeep sets SERVER_PORT; PORT is standard fallback
@@ -18,7 +25,7 @@ class Settings(BaseSettings):
     DOWNLOAD_TIMEOUT_SECONDS: int = 600
     DOWNLOAD_TTL_SECONDS: int = 900  # 15 minutes file retention
     MAX_CONCURRENT_DOWNLOADS: int = 3
-    TEMP_DOWNLOAD_DIR: str = os.getenv("TEMP_DOWNLOAD_DIR", "downloads_temp")
+    TEMP_DOWNLOAD_DIR: str = os.getenv("TEMP_DOWNLOAD_DIR", get_default_temp_dir())
 
     model_config = SettingsConfigDict(
         env_file=".env",

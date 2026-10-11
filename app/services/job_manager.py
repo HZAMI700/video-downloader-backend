@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional, Any
 import yt_dlp
 from app.config import settings
-from app.security import sanitize_filename
+from app.security import sanitize_filename, detect_media_platform
 from app.services.ytdlp_service import check_ffmpeg_installed
 
 logger = logging.getLogger("video_downloader.job_manager")
@@ -20,6 +20,7 @@ class DownloadJob:
     def __init__(self, job_id: str, url: str, format_id: str):
         self.job_id: str = job_id
         self.url: str = url
+        self.platform: str = detect_media_platform(url)
         self.format_id: str = format_id
         self.status: str = "queued"  # queued, processing, completed, failed
         self.progress_percent: float = 0.0
@@ -39,6 +40,7 @@ class DownloadJob:
         return {
             "job_id": self.job_id,
             "url": self.url,
+            "platform": self.platform,
             "format_id": self.format_id,
             "status": self.status,
             "progress_percent": round(self.progress_percent, 1),
@@ -66,6 +68,7 @@ class JobManager:
             job_id = str(uuid.uuid4())
             job = DownloadJob(job_id=job_id, url=url, format_id=format_id)
             self._jobs[job_id] = job
+            logger.info(f"Created job {job_id} for platform '{job.platform}' (format: {format_id})")
             return job
 
     def get_job(self, job_id: str) -> Optional[DownloadJob]:
@@ -82,6 +85,7 @@ class JobManager:
         if job.file_path and os.path.exists(job.file_path):
             try:
                 os.remove(job.file_path)
+                logger.info(f"Removed media file for job {job_id}: {job.file_path}")
             except Exception as e:
                 logger.warning(f"Failed to delete file {job.file_path}: {e}")
 
@@ -126,12 +130,15 @@ class JobManager:
         if not job:
             return
 
+        start_time = time.time()
+        logger.info(f"Starting download execution for job {job_id} [{job.platform}] format='{job.format_id}'")
+
         with self._semaphore:
             job.status = "processing"
             ffmpeg_available = check_ffmpeg_installed()
             temp_dir = settings.temp_dir_path
 
-            # Format logic
+            # Format logic supporting YouTube, TikTok, Facebook, Instagram
             format_id = job.format_id
             ydl_format = "best"
             postprocessors = []
@@ -155,7 +162,7 @@ class JobManager:
                     postprocessors.append({
                         "key": "FFmpegExtractAudio",
                         "preferredcodec": "mp3",
-                        "preferredquality": "192",
+                        "preferredquality": "320",
                     })
             elif format_id == "audio_m4a":
                 ydl_format = "bestaudio[ext=m4a]/bestaudio/best"
@@ -196,18 +203,21 @@ class JobManager:
                 "no_warnings": True,
                 "socket_timeout": 30,
                 "max_filesize": max_bytes,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
             }
 
             if postprocessors:
                 ydl_opts["postprocessors"] = postprocessors
 
             if not ffmpeg_available:
-                # Tell yt-dlp not to fail looking for ffmpeg if not installed
                 ydl_opts["prefer_ffmpeg"] = False
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(job.url, download=True)
+                    ydl.extract_info(job.url, download=True)
 
                 # Locate the downloaded file
                 pattern = str(temp_dir / f"{job_id}_*")
@@ -222,7 +232,6 @@ class JobManager:
 
                 # Extract a clean, safe filename for download attachment
                 base_name = os.path.basename(final_path)
-                # Strip job_id prefix
                 if base_name.startswith(f"{job_id}_"):
                     clean_name = base_name[len(job_id) + 1:]
                 else:
@@ -235,15 +244,31 @@ class JobManager:
                 job.progress_percent = 100.0
                 job.status = "completed"
                 job.completed_at = time.time()
+                elapsed = round(job.completed_at - start_time, 2)
+                logger.info(
+                    f"Download SUCCESS for job {job_id} [{job.platform}]: "
+                    f"size={job.file_size} bytes ({round(job.file_size / (1024*1024), 2)} MB) "
+                    f"in {elapsed}s -> {job.filename}"
+                )
 
             except Exception as e:
                 err_text = str(e)
-                logger.error(f"Download failed for job {job_id}: {err_text}")
+                elapsed = round(time.time() - start_time, 2)
+                logger.error(f"Download FAILED for job {job_id} [{job.platform}] after {elapsed}s: {err_text}")
                 job.status = "failed"
+
+                # Cleanup any partial files for this failed job
+                for f in temp_dir.glob(f"{job_id}*"):
+                    try:
+                        if f.is_file():
+                            f.unlink()
+                    except Exception:
+                        pass
+
                 # Sanitize error message to avoid internal paths
                 if "exceeds the server limit" in err_text:
                     job.error_message = err_text
-                elif "Private video" in err_text:
+                elif "Private video" in err_text or "this video is private" in err_text.lower():
                     job.error_message = "This media is private and cannot be downloaded."
                 elif "Sign in" in err_text or "login" in err_text.lower():
                     job.error_message = "This media requires login authentication."
@@ -251,8 +276,10 @@ class JobManager:
                     job.error_message = "Access to this media stream was forbidden by the hosting platform."
                 elif "FFmpeg" in err_text and not ffmpeg_available:
                     job.error_message = "This format requires FFmpeg conversion, which is currently unavailable."
+                elif "Unsupported URL" in err_text:
+                    job.error_message = "This platform URL is unsupported."
                 else:
-                    job.error_message = "Failed to download media. The content may be protected, geo-restricted, or unavailable."
+                    job.error_message = "Download failed. The media may be protected, geo-restricted, or removed."
 
 
 job_manager = JobManager()

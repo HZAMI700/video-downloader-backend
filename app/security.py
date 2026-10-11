@@ -21,6 +21,59 @@ def is_ip_private_or_restricted(ip_str: str) -> bool:
         return False
 
 
+def detect_media_platform(url: str) -> str:
+    """
+    Detect media platform from URL (YouTube, TikTok, Instagram, Facebook, etc.).
+    Supports standard URLs, short links (youtu.be, vm.tiktok.com, fb.watch), reels, and mobile links.
+    """
+    if not url or not isinstance(url, str):
+        return "Unknown"
+
+    try:
+        parsed = urlparse(url.strip())
+        hostname = (parsed.hostname or "").lower()
+    except Exception:
+        return "Unknown"
+
+    # YouTube (watch, shorts, youtu.be, m.youtube.com)
+    if "youtube.com" in hostname or "youtu.be" in hostname:
+        return "YouTube"
+
+    # TikTok (standard, vm.tiktok.com, vt.tiktok.com, m.tiktok.com)
+    if "tiktok.com" in hostname:
+        return "TikTok"
+
+    # Instagram (posts, reels, stories, tv, instagr.am)
+    if "instagram.com" in hostname or "instagr.am" in hostname:
+        return "Instagram"
+
+    # Facebook (watch, reels, fb.watch, fb.com, m.facebook.com)
+    if "facebook.com" in hostname or "fb.watch" in hostname or "fb.com" in hostname:
+        return "Facebook"
+
+    # Twitter / X
+    if "twitter.com" in hostname or "x.com" in hostname:
+        return "X (Twitter)"
+
+    # Reddit
+    if "reddit.com" in hostname or "redd.it" in hostname:
+        return "Reddit"
+
+    # Vimeo
+    if "vimeo.com" in hostname:
+        return "Vimeo"
+
+    # SoundCloud
+    if "soundcloud.com" in hostname:
+        return "SoundCloud"
+
+    # Twitch
+    if "twitch.tv" in hostname:
+        return "Twitch"
+
+    return "Web Media"
+
+
 def validate_media_url(url: str) -> str:
     """
     Validate that a given URL is a legitimate public web URL.
@@ -48,7 +101,11 @@ def validate_media_url(url: str) -> str:
     hostname_lower = hostname.lower()
 
     # Block well-known local/internal hostnames
-    if hostname_lower in ("localhost", "local", "broadcasthost") or hostname_lower.endswith(".local") or hostname_lower.endswith(".internal"):
+    if (
+        hostname_lower in ("localhost", "local", "broadcasthost")
+        or hostname_lower.endswith(".local")
+        or hostname_lower.endswith(".internal")
+    ):
         raise HTTPException(status_code=400, detail="Requests to local or internal network targets are prohibited.")
 
     # Check if host is direct IP

@@ -26,6 +26,7 @@ class DownloadCreateResponse(BaseModel):
 class DownloadStatusResponse(BaseModel):
     job_id: str
     url: str
+    platform: Optional[str] = "Unknown"
     format_id: str
     status: str
     progress_percent: float
