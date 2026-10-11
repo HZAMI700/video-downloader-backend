@@ -9,6 +9,7 @@ from app.routes.capabilities import router as capabilities_router
 from app.routes.metadata import router as metadata_router
 from app.routes.downloads import router as downloads_router
 from app.services.job_manager import job_manager
+from app.security_middleware import SecurityAndRateLimitMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -71,6 +72,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition", "Content-Length", "Accept-Ranges"]
 )
+app.add_middleware(SecurityAndRateLimitMiddleware)
 
 # Include Routers
 app.include_router(health_router)
