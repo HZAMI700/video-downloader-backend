@@ -16,6 +16,6 @@ def get_health():
     """Health check endpoint for Botkeep and monitoring probes."""
     return HealthResponse(
         status="ok",
-        service="video-downloader-backend",
+        service="playzy-backend",
         timestamp=time.time()
     )

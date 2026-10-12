@@ -3,7 +3,7 @@ def test_healthz_endpoint(client):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["service"] == "video-downloader-backend"
+    assert data["service"] == "playzy-backend"
     assert "timestamp" in data
 
 
