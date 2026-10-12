@@ -16,6 +16,7 @@ def test_capabilities_endpoint(client):
     assert isinstance(data["ffmpeg_available"], bool)
     assert data["max_file_size_mb"] > 0
     assert len(data["supported_extractors"]) > 0
+    assert "Pinterest" in data["supported_extractors"]
     assert "features" in data
     assert "audio_extraction" in data["features"]
     assert "video_muxing" in data["features"]

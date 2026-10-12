@@ -41,6 +41,7 @@ def get_capabilities():
             "YouTube",
             "TikTok",
             "Instagram",
+            "Pinterest",
             "X (Twitter)",
             "Facebook",
             "Reddit",

@@ -111,13 +111,23 @@ def download_completed_file(job_id: str):
     filename = job.filename or "downloaded_media"
     media_type = job.content_type or "application/octet-stream"
 
+    # RFC 6266 / RFC 5987 compliant Content-Disposition (safe ASCII + UTF-8 encoded)
+    import re
+    from urllib.parse import quote
+    safe_ascii_name = re.sub(r'[^\x20-\x7E]', '_', filename).replace('"', '_')
+    if not safe_ascii_name.strip('._'):
+        ext = Path(resolved_file).suffix or ".mp4"
+        safe_ascii_name = f"download_{job.job_id[:8]}{ext}"
+
+    encoded_name = quote(filename, encoding="utf-8")
+    content_disposition = f'attachment; filename="{safe_ascii_name}"; filename*=UTF-8\'\'{encoded_name}'
+
     return FileResponse(
         path=str(resolved_file),
-        filename=filename,
         media_type=media_type,
         headers={
             "Accept-Ranges": "bytes",
-            "Content-Disposition": f'attachment; filename="{filename}"'
+            "Content-Disposition": content_disposition,
         }
     )
 

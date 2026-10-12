@@ -51,6 +51,10 @@ def detect_media_platform(url: str) -> str:
     if "facebook.com" in hostname or "fb.watch" in hostname or "fb.com" in hostname:
         return "Facebook"
 
+    # Pinterest (pin.it, pinterest.com, regional domains)
+    if "pinterest." in hostname or "pin.it" in hostname:
+        return "Pinterest"
+
     # Twitter / X
     if "twitter.com" in hostname or "x.com" in hostname:
         return "X (Twitter)"
@@ -72,6 +76,66 @@ def detect_media_platform(url: str) -> str:
         return "Twitch"
 
     return "Web Media"
+
+
+def resolve_shortlink_url(url: str, timeout: int = 5) -> str:
+    """
+    Resolve known shortlinks or share URLs (pin.it, vm.tiktok.com, fb.watch, facebook.com/share/)
+    to their canonical target URL before validation or extraction.
+    """
+    if not url or not isinstance(url, str):
+        return url
+
+    url_str = url.strip()
+    try:
+        parsed = urlparse(url_str)
+        hostname = (parsed.hostname or "").lower()
+    except Exception:
+        return url_str
+
+    needs_resolve = (
+        "pin.it" in hostname
+        or "vm.tiktok.com" in hostname
+        or "vt.tiktok.com" in hostname
+        or "fb.watch" in hostname
+        or ("facebook.com" in hostname and "/share/" in url_str)
+        or ("tiktok.com" in hostname and "/t/" in url_str)
+        or "youtu.be" in hostname
+    )
+
+    if not needs_resolve:
+        return url_str
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    current = url_str
+    try:
+        import requests
+        from urllib.parse import urljoin
+        for _ in range(5):
+            r = requests.get(current, headers=headers, allow_redirects=False, timeout=timeout)
+            loc = r.headers.get("Location")
+            if not loc:
+                break
+            if loc.startswith("/"):
+                current = urljoin(current, loc)
+            else:
+                current = loc
+            if "/pin/" in current and "url_shortener" not in current:
+                break
+            if "facebook.com/reel/" in current or "facebook.com/watch" in current:
+                break
+            if "tiktok.com/@" in current and "/video/" in current:
+                break
+    except Exception:
+        pass
+
+    return current
+
 
 
 def validate_media_url(url: str) -> str:

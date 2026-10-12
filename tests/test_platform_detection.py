@@ -29,9 +29,16 @@ def test_instagram_url_detection():
     assert detect_media_platform("https://instagr.am/p/C4abcde123/") == "Instagram"
 
 
+def test_pinterest_url_detection():
+    assert detect_media_platform("https://www.pinterest.com/pin/123456789012345678/") == "Pinterest"
+    assert detect_media_platform("https://pin.it/4k0R82Q") == "Pinterest"
+    assert detect_media_platform("https://pinterest.de/pin/123456789012345678/") == "Pinterest"
+
+
 def test_other_platforms_detection():
     assert detect_media_platform("https://twitter.com/user/status/123456789") == "X (Twitter)"
     assert detect_media_platform("https://x.com/user/status/123456789") == "X (Twitter)"
     assert detect_media_platform("https://www.reddit.com/r/videos/comments/123/cool_video/") == "Reddit"
     assert detect_media_platform("https://vimeo.com/123456789") == "Vimeo"
     assert detect_media_platform("https://example.com/video.mp4") == "Web Media"
+

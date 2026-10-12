@@ -3,15 +3,17 @@ import glob
 import logging
 import mimetypes
 import os
+import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Dict, Optional, Any
+import requests
 import yt_dlp
 from app.config import settings
-from app.security import sanitize_filename, detect_media_platform
-from app.services.ytdlp_service import check_ffmpeg_installed
+from app.security import sanitize_filename, detect_media_platform, resolve_shortlink_url
+from app.services.ytdlp_service import check_ffmpeg_installed, extract_pinterest_metadata
 
 logger = logging.getLogger("video_downloader.job_manager")
 
@@ -137,37 +139,124 @@ class JobManager:
             job.status = "processing"
             ffmpeg_available = check_ffmpeg_installed()
             temp_dir = settings.temp_dir_path
+            max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
-            # Format logic supporting YouTube, TikTok, Facebook, Instagram
+            # --- DEDICATED PINTEREST DOWNLOAD HANDLER ---
+            if job.platform == "Pinterest":
+                try:
+                    p_data = extract_pinterest_metadata(job.url)
+                    direct_url = p_data.get("direct_media_url")
+                    if not direct_url:
+                        raise Exception("No direct media stream found for this Pinterest video.")
+
+                    title_sanitized = sanitize_filename(p_data.get("title", "pinterest_video"))
+                    final_mp4 = temp_dir / f"{job_id}_{title_sanitized}.mp4"
+
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "*/*",
+                    }
+
+                    r = requests.get(direct_url, headers=headers, stream=True, timeout=30)
+                    r.raise_for_status()
+
+                    total_len = int(r.headers.get("content-length", 0))
+                    job.total_bytes = total_len if total_len > 0 else None
+                    downloaded = 0
+
+                    with open(final_mp4, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            job.downloaded_bytes = downloaded
+                            if downloaded > max_bytes:
+                                raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
+                            if total_len > 0:
+                                job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
+
+                    # Audio conversion if requested
+                    if job.format_id == "audio_mp3":
+                        if not ffmpeg_available:
+                            raise Exception("MP3 audio extraction requires FFmpeg, which is not available.")
+                        mp3_path = temp_dir / f"{job_id}_{title_sanitized}.mp3"
+                        cmd = ["ffmpeg", "-y", "-i", str(final_mp4), "-vn", "-c:a", "libmp3lame", "-b:a", "320k", str(mp3_path)]
+                        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                        if res.returncode != 0:
+                            raise Exception(f"FFmpeg audio extraction failed: {res.stderr.decode('utf-8', errors='ignore')}")
+                        if os.path.exists(final_mp4):
+                            os.remove(final_mp4)
+                        output_path = mp3_path
+                        job.content_type = "audio/mpeg"
+                    else:
+                        output_path = final_mp4
+                        job.content_type = "video/mp4"
+
+                    job.file_path = str(output_path)
+                    job.file_size = os.path.getsize(output_path)
+                    job.filename = sanitize_filename(output_path.name[len(job_id) + 1:])
+                    job.progress_percent = 100.0
+                    job.status = "completed"
+                    job.completed_at = time.time()
+                    elapsed = round(job.completed_at - start_time, 2)
+                    logger.info(f"Download SUCCESS for Pinterest job {job_id}: {job.file_size} bytes in {elapsed}s")
+                    return
+
+                except Exception as e:
+                    err_text = str(e)
+                    elapsed = round(time.time() - start_time, 2)
+                    logger.error(f"Download FAILED for Pinterest job {job_id} after {elapsed}s: {err_text}")
+                    job.status = "failed"
+                    job.error_message = err_text if "exceeds the server limit" in err_text else "Failed to download Pinterest video."
+                    return
+
+            # --- STANDARD YT-DLP DOWNLOAD HANDLER (YouTube, TikTok, Facebook, Instagram) ---
+            target_url = resolve_shortlink_url(job.url)
             format_id = job.format_id
             ydl_format = "best"
             postprocessors = []
 
-            if format_id.startswith("video_"):
-                res = format_id.replace("video_", "").replace("p", "")
-                if res.isdigit():
-                    h = int(res)
+            if job.platform == "Facebook":
+                # Prefer progressive single-file MP4 for Facebook to eliminate CDN chunk drops
+                if format_id.startswith("video_"):
+                    res = format_id.replace("video_", "").replace("p", "")
+                    h = int(res) if res.isdigit() else 720
+                    ydl_format = f"best[height<={h}][ext=mp4]/bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={h}]/best"
+                elif format_id == "best_video":
+                    ydl_format = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best"
+                elif format_id == "audio_mp3":
+                    ydl_format = "bestaudio/best"
                     if ffmpeg_available:
-                        ydl_format = f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+                        postprocessors.append({
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "320",
+                        })
+            else:
+                if format_id.startswith("video_"):
+                    res = format_id.replace("video_", "").replace("p", "")
+                    if res.isdigit():
+                        h = int(res)
+                        if ffmpeg_available:
+                            ydl_format = f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+                        else:
+                            ydl_format = f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
+                elif format_id == "best_video":
+                    if ffmpeg_available:
+                        ydl_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
                     else:
-                        ydl_format = f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
-            elif format_id == "best_video":
-                if ffmpeg_available:
-                    ydl_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-                else:
-                    ydl_format = "best[ext=mp4]/best"
-            elif format_id == "audio_mp3":
-                ydl_format = "bestaudio/best"
-                if ffmpeg_available:
-                    postprocessors.append({
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "320",
-                    })
-            elif format_id == "audio_m4a":
-                ydl_format = "bestaudio[ext=m4a]/bestaudio/best"
-
-            max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+                        ydl_format = "best[ext=mp4]/best"
+                elif format_id == "audio_mp3":
+                    ydl_format = "bestaudio/best"
+                    if ffmpeg_available:
+                        postprocessors.append({
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "320",
+                        })
+                elif format_id == "audio_m4a":
+                    ydl_format = "bestaudio[ext=m4a]/bestaudio/best"
 
             def progress_hook(d: Dict[str, Any]):
                 if d.get("status") == "downloading":
@@ -188,7 +277,7 @@ class JobManager:
                     if total and total > 0:
                         job.progress_percent = min(99.0, (downloaded / total) * 100.0)
                     else:
-                        job.progress_percent = 50.0  # Streaming / uncalculated total
+                        job.progress_percent = 50.0
 
                 elif d.get("status") == "finished":
                     job.progress_percent = 99.0
@@ -202,9 +291,15 @@ class JobManager:
                 "quiet": True,
                 "no_warnings": True,
                 "socket_timeout": 30,
+                "retries": 10,
+                "fragment_retries": 10,
+                "file_access_retries": 5,
+                "buffersize": 1024 * 1024,
+                "continuedl": True,
+                "nocheckcertificate": True,
                 "max_filesize": max_bytes,
                 "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept-Language": "en-US,en;q=0.9",
                 }
             }
@@ -217,7 +312,7 @@ class JobManager:
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.extract_info(job.url, download=True)
+                    ydl.extract_info(target_url, download=True)
 
                 # Locate the downloaded file
                 pattern = str(temp_dir / f"{job_id}_*")
@@ -230,7 +325,6 @@ class JobManager:
                 job.file_path = final_path
                 job.file_size = os.path.getsize(final_path)
 
-                # Extract a clean, safe filename for download attachment
                 base_name = os.path.basename(final_path)
                 if base_name.startswith(f"{job_id}_"):
                     clean_name = base_name[len(job_id) + 1:]
@@ -248,7 +342,7 @@ class JobManager:
                 logger.info(
                     f"Download SUCCESS for job {job_id} [{job.platform}]: "
                     f"size={job.file_size} bytes ({round(job.file_size / (1024*1024), 2)} MB) "
-                    f"in {elapsed}s -> {job.filename}"
+                    f"in {elapsed}s"
                 )
 
             except Exception as e:

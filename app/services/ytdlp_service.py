@@ -1,11 +1,13 @@
 import logging
+import re
 import shutil
 import subprocess
 from typing import Dict, Any, List, Optional
+import requests
 import yt_dlp
 from fastapi import HTTPException
 from app.config import settings
-from app.security import detect_media_platform
+from app.security import detect_media_platform, resolve_shortlink_url
 
 logger = logging.getLogger("video_downloader.ytdlp")
 
@@ -70,29 +72,161 @@ def estimate_size_bytes(duration_sec: Optional[float], height: int) -> int:
     return int((bitrate_kbps * 1000 / 8) * dur)
 
 
+def extract_pinterest_metadata(url: str) -> Dict[str, Any]:
+    """
+    Extract Pinterest video metadata and direct MP4 streams.
+    Bypasses yt-dlp's broken Pinterest JSON API by scraping the public HTML page directly.
+    """
+    resolved_url = resolve_shortlink_url(url)
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+    }
+    
+    try:
+        r = requests.get(resolved_url, headers=headers, timeout=15)
+        html = r.text
+    except Exception as e:
+        logger.error(f"Failed to fetch Pinterest page for {resolved_url}: {e}")
+        raise HTTPException(status_code=400, detail="Failed to connect to Pinterest. Please check the URL.")
+
+    # Match Pin ID
+    pin_id_m = re.search(r'/pin/(\d+)', resolved_url)
+    pin_id = pin_id_m.group(1) if pin_id_m else "pinterest_video"
+
+    # Extract title
+    title_m = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+    raw_title = title_m.group(1) if title_m else f"Pinterest Video {pin_id}"
+    title = re.sub(r'\s*\|\s*Pinterest\s*$', '', raw_title).strip()
+    if not title:
+        title = f"Pinterest Video {pin_id}"
+
+    # Extract thumbnail
+    og_img = re.search(r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html)
+    thumbnail = og_img.group(1) if og_img else None
+    if not thumbnail:
+        imgs = re.findall(r'https://i\.pinimg\.com/[^\s"\'<>]+\.jpg', html)
+        if imgs:
+            originals = [i for i in imgs if '/736x/' in i or '/originals/' in i or '/564x/' in i]
+            thumbnail = originals[0] if originals else imgs[0]
+
+    # Find MP4 video URLs
+    mp4_urls = set(re.findall(r'https?://[^\s"\'<>]+\.mp4', html))
+    if not mp4_urls:
+        raise HTTPException(status_code=400, detail="No video stream found for this Pinterest pin. Please ensure the pin contains a video.")
+
+    mc_urls = [u for u in mp4_urls if '/videos/mc/' in u]
+    other_urls = [u for u in mp4_urls if '/videos/mc/' not in u]
+
+    def get_resolution_score(u: str) -> int:
+        if '1080' in u:
+            return 1080
+        if '720' in u:
+            return 720
+        if '540' in u:
+            return 540
+        if '480' in u:
+            return 480
+        if '360' in u:
+            return 360
+        return 240
+
+    if mc_urls:
+        mc_urls.sort(key=get_resolution_score, reverse=True)
+        best_video_url = mc_urls[0]
+    else:
+        sorted_others = sorted(other_urls, key=get_resolution_score, reverse=True)
+        best_video_url = sorted_others[0]
+
+    best_res = get_resolution_score(best_video_url)
+    res_label = f"{best_res}p" if best_res >= 360 else "HD"
+
+    ffmpeg_available = check_ffmpeg_installed()
+    formats = [
+        {
+            "format_id": f"video_{best_res}p" if best_res >= 360 else "best_video",
+            "type": "video",
+            "label": f"MP4 {res_label}",
+            "resolution": res_label,
+            "ext": "mp4",
+            "quality_note": "Original Pinterest Video Quality",
+            "requires_ffmpeg": False,
+            "available": True,
+            "approx_size_bytes": 15 * 1024 * 1024,
+        },
+        {
+            "format_id": "best_video",
+            "type": "video",
+            "label": "MP4 (Best Quality)",
+            "resolution": "HD",
+            "ext": "mp4",
+            "quality_note": "Direct High Speed Stream",
+            "requires_ffmpeg": False,
+            "available": True,
+            "approx_size_bytes": 15 * 1024 * 1024,
+        },
+        {
+            "format_id": "audio_mp3",
+            "type": "audio",
+            "label": "MP3 (320kbps)",
+            "resolution": "320kbps",
+            "ext": "mp3",
+            "quality_note": "Extracted Audio Track",
+            "requires_ffmpeg": True,
+            "available": True,
+            "approx_size_bytes": 4 * 1024 * 1024,
+        }
+    ]
+
+    return {
+        "id": pin_id,
+        "title": title,
+        "thumbnail": thumbnail,
+        "duration": None,
+        "duration_formatted": None,
+        "uploader": "Pinterest Creator",
+        "view_count": None,
+        "platform": "Pinterest",
+        "original_url": resolved_url,
+        "formats": formats,
+        "ffmpeg_available": ffmpeg_available,
+        "direct_media_url": best_video_url,
+    }
+
+
 def extract_media_metadata(url: str) -> Dict[str, Any]:
     """
-    Extract video metadata using yt-dlp supporting YouTube, TikTok, Facebook, Instagram, etc.
+    Extract video metadata using yt-dlp supporting YouTube, TikTok, Facebook, Instagram, Pinterest, etc.
     Returns structured details and supported formats.
     """
     ffmpeg_available = check_ffmpeg_installed()
-    detected_platform = detect_media_platform(url)
+    resolved_url = resolve_shortlink_url(url)
+    detected_platform = detect_media_platform(resolved_url)
+
+    # Route Pinterest directly to our reliable scraper
+    if detected_platform == "Pinterest":
+        return extract_pinterest_metadata(resolved_url)
 
     ydl_opts: Dict[str, Any] = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
-        "socket_timeout": 20,
+        "socket_timeout": 30,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(resolved_url, download=False)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
         logger.warning(f"Metadata extraction DownloadError for {detected_platform} URL: {msg}")
@@ -104,7 +238,7 @@ def extract_media_metadata(url: str) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="The provided URL is not supported.")
         raise HTTPException(status_code=400, detail="Failed to retrieve media. The media may be unavailable, restricted, or removed.")
     except Exception as e:
-        logger.error(f"Unexpected error extracting metadata for {url}: {e}")
+        logger.error(f"Unexpected error extracting metadata for {resolved_url}: {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected error while extracting metadata: {str(e)}")
 
     if not info:
@@ -125,6 +259,7 @@ def extract_media_metadata(url: str) -> Dict[str, Any]:
         vcodec = f.get("vcodec", "none")
         acodec = f.get("acodec", "none")
         height = f.get("height")
+        width = f.get("width")
         f_id = str(f.get("format_id", ""))
         filesize = f.get("filesize") or f.get("filesize_approx")
 
@@ -132,25 +267,28 @@ def extract_media_metadata(url: str) -> Dict[str, Any]:
         is_audio = acodec != "none"
         is_direct = is_video and is_audio
 
+        # For vertical videos (Reels, TikTok, Shorts), the shorter dimension indicates the standard quality scale (e.g. 1080x1920 is 1080p)
+        effective_height = min(width, height) if (width and height) else height
+
         # Special handling for Facebook 'hd' and 'sd'
-        if "hd" in f_id.lower() and not height:
-            height = 1080
+        if "hd" in f_id.lower() and not effective_height:
+            effective_height = 1080
             is_video = True
-        elif "sd" in f_id.lower() and not height:
-            height = 480
+        elif "sd" in f_id.lower() and not effective_height:
+            effective_height = 480
             is_video = True
 
-        if is_video and height:
-            res_key = f"{height}p"
+        if is_video and effective_height:
+            res_key = f"{effective_height}p"
             if res_key not in video_map or (is_direct and not video_map[res_key].get("is_direct")):
                 video_map[res_key] = {
-                    "height": height,
+                    "height": effective_height,
                     "is_direct": is_direct,
-                    "filesize": filesize or estimate_size_bytes(duration_sec, height),
+                    "filesize": filesize or estimate_size_bytes(duration_sec, effective_height),
                 }
 
         if is_direct:
-            if not best_single_format or (height and height > (best_single_format.get("height") or 0)):
+            if not best_single_format or (effective_height and effective_height > (best_single_format.get("height") or 0)):
                 best_single_format = f
 
     # Standard desired qualities: 1080p, 720p, 480p, 360p
