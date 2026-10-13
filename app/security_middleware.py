@@ -1,8 +1,12 @@
+import logging
 import time
+import uuid
 from collections import defaultdict
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
+
+logger = logging.getLogger("video_downloader.access")
 
 # Max requests per window per IP
 RATE_LIMIT_REQUESTS = 60
@@ -15,22 +19,30 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self.request_history = defaultdict(list)
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        # Generate or capture unique request ID
+        req_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:10]}"
+        request.state.request_id = req_id
+        start_time = time.time()
+        client_ip = request.client.host if request.client else "anonymous"
+
         # Bypass rate limiter for health check and CORS preflights
         if request.url.path == "/healthz" or request.method == "OPTIONS":
             response = await call_next(request)
-            self._apply_security_headers(response)
+            self._apply_security_headers(response, req_id)
             return response
 
         # Enforce max content length on request body (1 MB max for metadata/json)
         content_length = request.headers.get("content-length")
         if content_length and int(content_length) > 1024 * 1024:
-            return JSONResponse(
+            logger.warning(f"[{req_id}] Payload too large ({content_length} bytes) from {client_ip}")
+            response = JSONResponse(
                 status_code=413,
                 content={"detail": "Payload too large. Maximum allowed size is 1MB."}
             )
+            self._apply_security_headers(response, req_id)
+            return response
 
         # Rate Limiting
-        client_ip = request.client.host if request.client else "anonymous"
         now = time.time()
 
         # Clean timestamps older than window
@@ -39,22 +51,35 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             timestamps.pop(0)
 
         if len(timestamps) >= RATE_LIMIT_REQUESTS:
-            return JSONResponse(
+            logger.warning(f"[{req_id}] Rate limit exceeded for IP {client_ip}")
+            response = JSONResponse(
                 status_code=429,
                 content={"detail": "Rate limit exceeded. Too many requests, please slow down."}
             )
+            self._apply_security_headers(response, req_id)
+            return response
 
         timestamps.append(now)
 
         # Process request
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as e:
+            elapsed_ms = round((time.time() - start_time) * 1000, 1)
+            logger.error(f"[{req_id}] Unhandled error on {request.method} {request.url.path} after {elapsed_ms}ms: {e}")
+            raise e
+
+        elapsed_ms = round((time.time() - start_time) * 1000, 1)
+        logger.info(f"[{req_id}] {request.method} {request.url.path} -> {response.status_code} ({elapsed_ms}ms) IP={client_ip}")
 
         # Apply standard security headers
-        self._apply_security_headers(response)
+        self._apply_security_headers(response, req_id)
         return response
 
-    def _apply_security_headers(self, response: Response):
+    def _apply_security_headers(self, response: Response, req_id: str):
+        response.headers["X-Request-ID"] = req_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+

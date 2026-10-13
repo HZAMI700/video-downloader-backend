@@ -13,7 +13,12 @@ import requests
 import yt_dlp
 from app.config import settings
 from app.security import sanitize_filename, detect_media_platform, resolve_shortlink_url
-from app.services.ytdlp_service import check_ffmpeg_installed, extract_pinterest_metadata
+from app.services.ytdlp_service import (
+    check_ffmpeg_installed,
+    extract_pinterest_metadata,
+    extract_tiktok_metadata,
+    extract_facebook_direct_metadata,
+)
 
 logger = logging.getLogger("video_downloader.job_manager")
 
@@ -211,6 +216,62 @@ class JobManager:
                     job.error_message = err_text if "exceeds the server limit" in err_text else "Failed to download Pinterest video."
                     return
 
+            # --- DEDICATED TIKTOK STREAMING DOWNLOAD HANDLER ---
+            if job.platform == "TikTok":
+                try:
+                    tt_data = extract_tiktok_metadata(job.url)
+                    if tt_data:
+                        direct_url = None
+                        is_audio = job.format_id == "audio_mp3"
+                        for f in tt_data.get("formats", []):
+                            if f.get("format_id") == job.format_id and f.get("direct_url"):
+                                direct_url = f.get("direct_url")
+                                break
+                        if not direct_url:
+                            direct_url = tt_data.get("direct_media_url")
+
+                        if direct_url:
+                            title_sanitized = sanitize_filename(tt_data.get("title", "tiktok_video"))
+                            ext = "mp3" if is_audio else "mp4"
+                            final_file = temp_dir / f"{job_id}_{title_sanitized}.{ext}"
+
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                "Accept": "*/*",
+                            }
+
+                            r = requests.get(direct_url, headers=headers, stream=True, timeout=30)
+                            r.raise_for_status()
+
+                            total_len = int(r.headers.get("content-length", 0))
+                            job.total_bytes = total_len if total_len > 0 else None
+                            downloaded = 0
+
+                            with open(final_file, "wb") as f:
+                                for chunk in r.iter_content(chunk_size=65536):
+                                    if not chunk:
+                                        continue
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    job.downloaded_bytes = downloaded
+                                    if downloaded > max_bytes:
+                                        raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
+                                    if total_len > 0:
+                                        job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
+
+                            job.file_path = str(final_file)
+                            job.file_size = os.path.getsize(final_file)
+                            job.filename = sanitize_filename(final_file.name[len(job_id) + 1:])
+                            job.content_type = "audio/mpeg" if is_audio else "video/mp4"
+                            job.progress_percent = 100.0
+                            job.status = "completed"
+                            job.completed_at = time.time()
+                            elapsed = round(job.completed_at - start_time, 2)
+                            logger.info(f"Download SUCCESS for TikTok job {job_id}: {job.file_size} bytes in {elapsed}s")
+                            return
+                except Exception as e:
+                    logger.warning(f"TikTok streaming download failed for job {job_id}, attempting yt-dlp fallback: {e}")
+
             # --- STANDARD YT-DLP DOWNLOAD HANDLER (YouTube, TikTok, Facebook, Instagram) ---
             target_url = resolve_shortlink_url(job.url)
             format_id = job.format_id
@@ -347,6 +408,70 @@ class JobManager:
 
             except Exception as e:
                 err_text = str(e)
+                logger.warning(f"Standard yt-dlp download failed for job {job_id} [{job.platform}]: {err_text}")
+
+                # If Facebook yt-dlp download failed, attempt direct HTML scraper fallback
+                if job.platform == "Facebook":
+                    try:
+                        logger.info(f"Attempting direct Facebook fallback download for job {job_id}...")
+                        fb_data = extract_facebook_direct_metadata(job.url)
+                        if fb_data and fb_data.get("direct_media_url"):
+                            direct_url = fb_data["direct_media_url"]
+                            title_sanitized = sanitize_filename(fb_data.get("title", "facebook_video"))
+                            final_mp4 = temp_dir / f"{job_id}_{title_sanitized}.mp4"
+
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                "Accept": "*/*",
+                            }
+
+                            r = requests.get(direct_url, headers=headers, stream=True, timeout=30)
+                            r.raise_for_status()
+
+                            total_len = int(r.headers.get("content-length", 0))
+                            job.total_bytes = total_len if total_len > 0 else None
+                            downloaded = 0
+
+                            with open(final_mp4, "wb") as f:
+                                for chunk in r.iter_content(chunk_size=65536):
+                                    if not chunk:
+                                        continue
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    job.downloaded_bytes = downloaded
+                                    if downloaded > max_bytes:
+                                        raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
+                                    if total_len > 0:
+                                        job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
+
+                            if job.format_id == "audio_mp3" and ffmpeg_available:
+                                mp3_path = temp_dir / f"{job_id}_{title_sanitized}.mp3"
+                                cmd = ["ffmpeg", "-y", "-i", str(final_mp4), "-vn", "-c:a", "libmp3lame", "-b:a", "320k", str(mp3_path)]
+                                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                                if res.returncode == 0:
+                                    if os.path.exists(final_mp4):
+                                        os.remove(final_mp4)
+                                    output_path = mp3_path
+                                    job.content_type = "audio/mpeg"
+                                else:
+                                    output_path = final_mp4
+                                    job.content_type = "video/mp4"
+                            else:
+                                output_path = final_mp4
+                                job.content_type = "video/mp4"
+
+                            job.file_path = str(output_path)
+                            job.file_size = os.path.getsize(output_path)
+                            job.filename = sanitize_filename(output_path.name[len(job_id) + 1:])
+                            job.progress_percent = 100.0
+                            job.status = "completed"
+                            job.completed_at = time.time()
+                            elapsed = round(job.completed_at - start_time, 2)
+                            logger.info(f"Download SUCCESS for Facebook direct fallback job {job_id}: {job.file_size} bytes in {elapsed}s")
+                            return
+                    except Exception as fb_err:
+                        logger.warning(f"Facebook direct fallback also failed for job {job_id}: {fb_err}")
+
                 elapsed = round(time.time() - start_time, 2)
                 logger.error(f"Download FAILED for job {job_id} [{job.platform}] after {elapsed}s: {err_text}")
                 job.status = "failed"
@@ -359,21 +484,21 @@ class JobManager:
                     except Exception:
                         pass
 
-                # Sanitize error message to avoid internal paths
+                # Structured platform-specific error messages
                 if "exceeds the server limit" in err_text:
                     job.error_message = err_text
-                elif "Private video" in err_text or "this video is private" in err_text.lower():
-                    job.error_message = "This media is private and cannot be downloaded."
+                elif "Private video" in err_text or "this video is private" in err_text.lower() or "not available" in err_text.lower():
+                    job.error_message = f"This {job.platform} media is private or restricted by creator permissions."
                 elif "Sign in" in err_text or "login" in err_text.lower():
-                    job.error_message = "This media requires login authentication."
+                    job.error_message = f"This {job.platform} media requires account login."
                 elif "HTTP Error 403" in err_text:
-                    job.error_message = "Access to this media stream was forbidden by the hosting platform."
+                    job.error_message = f"Access to this {job.platform} media stream was restricted by the host."
                 elif "FFmpeg" in err_text and not ffmpeg_available:
                     job.error_message = "This format requires FFmpeg conversion, which is currently unavailable."
                 elif "Unsupported URL" in err_text:
-                    job.error_message = "This platform URL is unsupported."
+                    job.error_message = f"This {job.platform} URL format is unsupported."
                 else:
-                    job.error_message = "Download failed. The media may be protected, geo-restricted, or removed."
+                    job.error_message = f"Failed to download {job.platform} media. Please try a different quality or check if the video is publicly visible."
 
 
 job_manager = JobManager()

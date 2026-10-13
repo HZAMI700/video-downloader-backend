@@ -1,5 +1,5 @@
-from typing import List, Optional
-from fastapi import APIRouter
+from typing import List, Optional, Union
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, HttpUrl
 from app.security import validate_media_url
 from app.services.ytdlp_service import extract_media_metadata
@@ -27,7 +27,7 @@ class MetadataResponse(BaseModel):
     id: str
     title: str
     thumbnail: Optional[str] = None
-    duration: Optional[int] = None
+    duration: Optional[Union[int, float]] = None
     duration_formatted: Optional[str] = None
     uploader: Optional[str] = None
     view_count: Optional[int] = None
@@ -38,10 +38,12 @@ class MetadataResponse(BaseModel):
 
 
 @router.post("/metadata", response_model=MetadataResponse)
-def get_metadata(payload: MetadataRequest):
+def get_metadata(payload: MetadataRequest, request: Request):
     """
     Validate URL and retrieve video information and available formats without downloading.
     """
+    req_id = getattr(request.state, "request_id", "req_unknown")
     valid_url = validate_media_url(payload.url)
-    data = extract_media_metadata(valid_url)
+    data = extract_media_metadata(valid_url, request_id=req_id)
     return MetadataResponse(**data)
+

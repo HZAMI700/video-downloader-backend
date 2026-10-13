@@ -199,18 +199,248 @@ def extract_pinterest_metadata(url: str) -> Dict[str, Any]:
     }
 
 
-def extract_media_metadata(url: str) -> Dict[str, Any]:
+def classify_extraction_error(e: Exception, platform: str, url: str) -> HTTPException:
     """
-    Extract video metadata using yt-dlp supporting YouTube, TikTok, Facebook, Instagram, Pinterest, etc.
-    Returns structured details and supported formats.
+    Classify yt-dlp or platform extraction exceptions into structured HTTP exceptions.
+    Never exposes internal tokens, cookies, or raw tracebacks to the client.
+    """
+    msg = str(e)
+    clean_msg = re.sub(r'https?://[^\s<>"]+', '', msg).strip()
+
+    if any(term in msg.lower() for term in ["private video", "is private", "this content isn't available right now", "requires approval"]):
+        return HTTPException(status_code=403, detail=f"This {platform} video is private or restricted to authorized viewers.")
+
+    if any(term in msg.lower() for term in ["sign in", "login", "requires authentication", "log in"]):
+        return HTTPException(status_code=403, detail=f"This {platform} video requires an account login to view.")
+
+    if any(term in msg.lower() for term in ["video unavailable", "does not exist", "removed", "deleted", "not found", "status code 404"]):
+        return HTTPException(status_code=404, detail=f"This {platform} video was removed, deleted, or does not exist.")
+
+    if any(term in msg.lower() for term in ["blocked from accessing", "challenge", "captcha", "anti-bot", "bot detection"]):
+        return HTTPException(status_code=503, detail=f"Temporary {platform} security challenge encountered. Please retry shortly.")
+
+    if any(term in msg.lower() for term in ["rate limit", "too many requests", "429"]):
+        return HTTPException(status_code=429, detail=f"{platform} request limit reached. Please wait a moment before trying again.")
+
+    if any(term in msg.lower() for term in ["timed out", "timeout", "connection refused"]):
+        return HTTPException(status_code=504, detail=f"Connection to {platform} timed out. Please check the link and try again.")
+
+    if "unsupported url" in msg.lower():
+        return HTTPException(status_code=400, detail=f"The URL provided is not a supported {platform} media link.")
+
+    return HTTPException(status_code=400, detail=f"Unable to extract video details from {platform}. The media may be restricted or in an unsupported format.")
+
+
+def extract_tiktok_metadata(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract TikTok video metadata and direct MP4 streams without watermarks.
+    Uses TikWM API first (bypassing cloud/datacenter IP challenge locks), with fallback to yt-dlp.
+    """
+    resolved_url = resolve_shortlink_url(url)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    try:
+        r = requests.post("https://www.tikwm.com/api/", data={"url": resolved_url}, headers=headers, timeout=12)
+        if r.status_code == 200:
+            res = r.json()
+            if res.get("code") == 0 and res.get("data"):
+                d = res["data"]
+                title = d.get("title") or "TikTok Video"
+                dur = int(round(d.get("duration") or 0))
+                uploader = (d.get("author") or {}).get("nickname") or (d.get("author") or {}).get("unique_id") or "TikTok Creator"
+                play_url = d.get("play")
+                hd_play_url = d.get("hdplay")
+                music_url = d.get("music")
+                cover = d.get("cover") or d.get("origin_cover")
+                video_id = str(d.get("id") or "tiktok_video")
+
+                formats = []
+                if hd_play_url:
+                    formats.append({
+                        "format_id": "video_1080p",
+                        "type": "video",
+                        "label": "MP4 1080p Full HD (No Watermark)",
+                        "resolution": "1080p",
+                        "ext": "mp4",
+                        "quality_note": "Crystal High Bitrate Without Watermark",
+                        "requires_ffmpeg": False,
+                        "available": True,
+                        "approx_size_bytes": d.get("size") or (15 * 1024 * 1024),
+                        "direct_url": hd_play_url,
+                    })
+                if play_url:
+                    formats.append({
+                        "format_id": "video_720p",
+                        "type": "video",
+                        "label": "MP4 (No Watermark)",
+                        "resolution": "720p",
+                        "ext": "mp4",
+                        "quality_note": "Original Video Without Watermark",
+                        "requires_ffmpeg": False,
+                        "available": True,
+                        "approx_size_bytes": d.get("size") or (8 * 1024 * 1024),
+                        "direct_url": play_url,
+                    })
+                if music_url:
+                    formats.append({
+                        "format_id": "audio_mp3",
+                        "type": "audio",
+                        "label": "MP3 (320kbps Audio)",
+                        "resolution": "320kbps",
+                        "ext": "mp3",
+                        "quality_note": "Original Soundtrack",
+                        "requires_ffmpeg": False,
+                        "available": True,
+                        "approx_size_bytes": 3 * 1024 * 1024,
+                        "direct_url": music_url,
+                    })
+
+                ffmpeg_available = check_ffmpeg_installed()
+                return {
+                    "id": video_id,
+                    "title": title,
+                    "thumbnail": cover,
+                    "duration": dur,
+                    "duration_formatted": format_duration(dur),
+                    "uploader": uploader,
+                    "view_count": d.get("play_count"),
+                    "platform": "TikTok",
+                    "original_url": resolved_url,
+                    "formats": formats,
+                    "ffmpeg_available": ffmpeg_available,
+                    "direct_media_url": hd_play_url or play_url,
+                }
+    except Exception as e:
+        logger.warning(f"TikWM extraction failed for {resolved_url}: {e}")
+
+    return None
+
+
+def extract_facebook_direct_metadata(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract Facebook video metadata directly by scraping public OpenGraph and embedded JSON streams.
+    Serves as a reliable fallback when yt-dlp's mobile parser encounters schema changes.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=12)
+        html = r.text
+
+        hd_match = re.search(r'"browser_native_hd_url"\s*:\s*"([^"]+)"', html)
+        sd_match = re.search(r'"browser_native_sd_url"\s*:\s*"([^"]+)"', html)
+        playable_match = re.search(r'"playable_url"\s*:\s*"([^"]+)"', html)
+        og_match = re.search(r'<meta[^>]*property="og:video"[^>]*content="([^"]+)"', html)
+
+        hd_url = hd_match.group(1).replace(r'\/', '/').encode().decode('unicode-escape', errors='ignore') if hd_match else None
+        sd_url = sd_match.group(1).replace(r'\/', '/').encode().decode('unicode-escape', errors='ignore') if sd_match else None
+        play_url = playable_match.group(1).replace(r'\/', '/').encode().decode('unicode-escape', errors='ignore') if playable_match else (og_match.group(1) if og_match else None)
+
+        best_stream = hd_url or sd_url or play_url
+        if not best_stream:
+            return None
+
+        title_m = re.search(r'<title>(.*?)</title>', html)
+        title = title_m.group(1).replace(' | Facebook', '').replace('Facebook', '').strip() if title_m else "Facebook Video"
+        if not title:
+            title = "Facebook Video"
+
+        og_thumb = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html)
+        thumb = og_thumb.group(1) if og_thumb else None
+
+        formats = []
+        if hd_url:
+            formats.append({
+                "format_id": "video_1080p",
+                "type": "video",
+                "label": "MP4 1080p Full HD",
+                "resolution": "1080p",
+                "ext": "mp4",
+                "quality_note": "High Definition Progressive MP4",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": 25 * 1024 * 1024,
+                "direct_url": hd_url,
+            })
+        if sd_url or play_url:
+            formats.append({
+                "format_id": "video_720p",
+                "type": "video",
+                "label": "MP4 720p HD",
+                "resolution": "720p",
+                "ext": "mp4",
+                "quality_note": "Standard High Definition",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": 15 * 1024 * 1024,
+                "direct_url": sd_url or play_url,
+            })
+
+        ffmpeg_available = check_ffmpeg_installed()
+        formats.append({
+            "format_id": "audio_mp3",
+            "type": "audio",
+            "label": "MP3 (320kbps Audio)",
+            "resolution": "320kbps",
+            "ext": "mp3",
+            "quality_note": "High Bitrate Crystal Audio",
+            "requires_ffmpeg": True,
+            "available": True,
+            "approx_size_bytes": 4 * 1024 * 1024,
+            "direct_url": best_stream,
+        })
+
+        return {
+            "id": "fb_video",
+            "title": title,
+            "thumbnail": thumb,
+            "duration": None,
+            "duration_formatted": None,
+            "uploader": "Facebook Creator",
+            "view_count": None,
+            "platform": "Facebook",
+            "original_url": url,
+            "formats": formats,
+            "ffmpeg_available": ffmpeg_available,
+            "direct_media_url": best_stream,
+        }
+    except Exception as e:
+        logger.warning(f"Facebook direct extraction failed: {e}")
+        return None
+
+
+def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Extract video metadata using multi-tier extractors (TikTok/Pinterest direct engines + yt-dlp).
+    Returns structured details, accurate durations, and supported formats.
     """
     ffmpeg_available = check_ffmpeg_installed()
     resolved_url = resolve_shortlink_url(url)
     detected_platform = detect_media_platform(resolved_url)
 
-    # Route Pinterest directly to our reliable scraper
+    # 1. Route Pinterest directly to our reliable scraper
     if detected_platform == "Pinterest":
         return extract_pinterest_metadata(resolved_url)
+
+    # 2. Route TikTok to TikWM direct engine first to prevent datacenter IP blocks
+    if detected_platform == "TikTok":
+        tt_data = extract_tiktok_metadata(resolved_url)
+        if tt_data:
+            logger.info(f"[{request_id or 'anon'}] TikTok extracted successfully via direct pipeline")
+            return tt_data
+
+    # 3. For Facebook, normalize reel links to canonical watch parameters if possible
+    target_extract_url = resolved_url
+    if detected_platform == "Facebook":
+        reel_m = re.search(r'facebook\.com/reel/(\d+)', resolved_url)
+        if reel_m:
+            target_extract_url = f"https://www.facebook.com/watch/?v={reel_m.group(1)}"
 
     ydl_opts: Dict[str, Any] = {
         "skip_download": True,
@@ -224,25 +454,30 @@ def extract_media_metadata(url: str) -> Dict[str, Any]:
         },
     }
 
+    info = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(resolved_url, download=False)
-    except yt_dlp.utils.DownloadError as e:
-        msg = str(e)
-        logger.warning(f"Metadata extraction DownloadError for {detected_platform} URL: {msg}")
-        if "Private video" in msg or "this video is private" in msg.lower():
-            raise HTTPException(status_code=403, detail="This video is private and cannot be accessed.")
-        if "Sign in" in msg or "login" in msg.lower():
-            raise HTTPException(status_code=403, detail="This media requires account login and cannot be accessed.")
-        if "Unsupported URL" in msg:
-            raise HTTPException(status_code=400, detail="The provided URL is not supported.")
-        raise HTTPException(status_code=400, detail="Failed to retrieve media. The media may be unavailable, restricted, or removed.")
+            info = ydl.extract_info(target_extract_url, download=False)
     except Exception as e:
-        logger.error(f"Unexpected error extracting metadata for {resolved_url}: {e}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error while extracting metadata: {str(e)}")
+        logger.warning(f"[{request_id or 'anon'}] yt-dlp extraction failed for {detected_platform} ({target_extract_url}): {e}")
+
+        # If Facebook fails in yt-dlp, trigger direct HTML scraper fallback
+        if detected_platform == "Facebook":
+            fb_data = extract_facebook_direct_metadata(resolved_url)
+            if fb_data:
+                logger.info(f"[{request_id or 'anon'}] Facebook direct HTML fallback succeeded")
+                return fb_data
+
+        # If TikTok was bypassed or failed earlier, recheck
+        if detected_platform == "TikTok":
+            tt_data = extract_tiktok_metadata(resolved_url)
+            if tt_data:
+                return tt_data
+
+        raise classify_extraction_error(e, detected_platform, resolved_url)
 
     if not info:
-        raise HTTPException(status_code=404, detail="No media information found for the requested URL.")
+        raise HTTPException(status_code=404, detail=f"No media information found for the requested {detected_platform} URL.")
 
     # Process formats
     raw_formats = info.get("formats", [])
@@ -350,13 +585,14 @@ def extract_media_metadata(url: str) -> Dict[str, Any]:
     })
 
     platform_title = detected_platform if detected_platform != "Web Media" else (info.get("extractor_key") or "Web Media")
+    dur_int = int(round(duration_sec)) if duration_sec is not None else None
 
     return {
         "id": str(info.get("id", "")),
         "title": info.get("title") or "Untitled Media",
         "thumbnail": info.get("thumbnail"),
-        "duration": duration_sec,
-        "duration_formatted": format_duration(duration_sec),
+        "duration": dur_int,
+        "duration_formatted": format_duration(dur_int),
         "uploader": info.get("uploader") or info.get("channel") or info.get("creator") or "Unknown Creator",
         "view_count": info.get("view_count"),
         "platform": platform_title,

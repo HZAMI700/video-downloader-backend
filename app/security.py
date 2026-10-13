@@ -78,10 +78,32 @@ def detect_media_platform(url: str) -> str:
     return "Web Media"
 
 
+def is_safe_public_url(url_str: str) -> bool:
+    """Helper to check if a target redirect URL is safe and not an SSRF attempt."""
+    try:
+        parsed = urlparse(url_str)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+        hostname = (parsed.hostname or "").lower()
+        if not hostname or hostname in ("localhost", "local", "broadcasthost") or hostname.endswith(".local") or hostname.endswith(".internal"):
+            return False
+        if is_ip_private_or_restricted(hostname):
+            return False
+        addr_info = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        for entry in addr_info:
+            ip_str = entry[4][0]
+            if is_ip_private_or_restricted(ip_str):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def resolve_shortlink_url(url: str, timeout: int = 5) -> str:
     """
     Resolve known shortlinks or share URLs (pin.it, vm.tiktok.com, fb.watch, facebook.com/share/)
     to their canonical target URL before validation or extraction.
+    Ensures safe redirects without allowing SSRF to private/internal addresses.
     """
     if not url or not isinstance(url, str):
         return url
@@ -122,9 +144,15 @@ def resolve_shortlink_url(url: str, timeout: int = 5) -> str:
             if not loc:
                 break
             if loc.startswith("/"):
-                current = urljoin(current, loc)
+                next_url = urljoin(current, loc)
             else:
-                current = loc
+                next_url = loc
+            
+            # Security: ensure redirect hop is safe and public
+            if not is_safe_public_url(next_url):
+                break
+            current = next_url
+
             if "/pin/" in current and "url_shortener" not in current:
                 break
             if "facebook.com/reel/" in current or "facebook.com/watch" in current:

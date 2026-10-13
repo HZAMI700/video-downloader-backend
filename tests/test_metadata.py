@@ -60,3 +60,85 @@ def test_metadata_extractor_error(client):
         response = client.post("/api/metadata", json={"url": "https://www.youtube.com/watch?v=private"})
         assert response.status_code == 403
         assert response.json()["detail"] == "Private video"
+
+
+def test_metadata_facebook_float_duration(client):
+    mock_fb_data = {
+        "id": "10153231379946729",
+        "title": "Facebook Video",
+        "thumbnail": "https://example.com/fb_thumb.jpg",
+        "duration": 74.304,  # Float duration that previously triggered ValidationError
+        "duration_formatted": "01:14",
+        "uploader": "Mark",
+        "view_count": 50000,
+        "platform": "Facebook",
+        "original_url": "https://www.facebook.com/watch/?v=10153231379946729",
+        "formats": [
+            {
+                "format_id": "video_1080p",
+                "type": "video",
+                "label": "MP4 1080p Full HD",
+                "resolution": "1080p",
+                "ext": "mp4",
+                "quality_note": "High Definition",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": 10485760
+            }
+        ],
+        "ffmpeg_available": True
+    }
+    with patch("app.routes.metadata.extract_media_metadata", return_value=mock_fb_data):
+        response = client.post("/api/metadata", json={"url": "https://www.facebook.com/watch/?v=10153231379946729"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["platform"] == "Facebook"
+        assert data["duration"] == 74.304 or data["duration"] == 74
+
+
+def test_metadata_tiktok_success(client):
+    mock_tt_data = {
+        "id": "7106594312292453678",
+        "title": "Viral TikTok",
+        "thumbnail": "https://example.com/tt_thumb.jpg",
+        "duration": 15,
+        "duration_formatted": "00:15",
+        "uploader": "tiktok_creator",
+        "view_count": 250000,
+        "platform": "TikTok",
+        "original_url": "https://www.tiktok.com/@tiktok/video/7106594312292453678",
+        "formats": [
+            {
+                "format_id": "video_1080p",
+                "type": "video",
+                "label": "MP4 1080p Full HD (No Watermark)",
+                "resolution": "1080p",
+                "ext": "mp4",
+                "quality_note": "Crystal High Bitrate Without Watermark",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": 15000000
+            }
+        ],
+        "ffmpeg_available": True
+    }
+    with patch("app.routes.metadata.extract_media_metadata", return_value=mock_tt_data):
+        response = client.post("/api/metadata", json={"url": "https://www.tiktok.com/@tiktok/video/7106594312292453678"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["platform"] == "TikTok"
+        assert "No Watermark" in data["formats"][0]["label"]
+
+
+def test_classify_extraction_error_messages():
+    from app.services.ytdlp_service import classify_extraction_error
+    e_priv = Exception("ERROR: [youtube] 123: Private video")
+    http_e = classify_extraction_error(e_priv, "YouTube", "https://youtube.com/watch?v=123")
+    assert http_e.status_code == 403
+    assert "private" in http_e.detail.lower()
+
+    e_bot = Exception("ERROR: [TikTok] 123: Your IP address is blocked from accessing this post")
+    http_bot = classify_extraction_error(e_bot, "TikTok", "https://tiktok.com/@u/video/123")
+    assert http_bot.status_code == 503
+    assert "security challenge" in http_bot.detail.lower()
+
