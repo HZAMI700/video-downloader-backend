@@ -8,6 +8,7 @@ import yt_dlp
 from fastapi import HTTPException
 from app.config import settings
 from app.security import detect_media_platform, resolve_shortlink_url
+from app.services.cobalt_service import extract_cobalt_media
 
 logger = logging.getLogger("video_downloader.ytdlp")
 
@@ -428,19 +429,27 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
     if detected_platform == "Pinterest":
         return extract_pinterest_metadata(resolved_url)
 
-    # 2. Route TikTok to TikWM direct engine first to prevent datacenter IP blocks
+    # 2. Route TikTok to TikWM direct engine first to prevent datacenter IP blocks, with Cobalt fallback
     if detected_platform == "TikTok":
         tt_data = extract_tiktok_metadata(resolved_url)
         if tt_data:
-            logger.info(f"[{request_id or 'anon'}] TikTok extracted successfully via direct pipeline")
+            logger.info(f"[{request_id or 'anon'}] TikTok extracted successfully via TikWM pipeline")
             return tt_data
+        cobalt_data = extract_cobalt_media(resolved_url)
+        if cobalt_data:
+            logger.info(f"[{request_id or 'anon'}] TikTok extracted successfully via Cobalt pipeline")
+            return cobalt_data
 
-    # 3. For Facebook, normalize reel links to canonical watch parameters if possible
+    # 3. For Facebook, normalize reel links and try high-speed Cobalt engine first
     target_extract_url = resolved_url
     if detected_platform == "Facebook":
         reel_m = re.search(r'facebook\.com/reel/(\d+)', resolved_url)
         if reel_m:
             target_extract_url = f"https://www.facebook.com/watch/?v={reel_m.group(1)}"
+        cobalt_data = extract_cobalt_media(target_extract_url) or extract_cobalt_media(resolved_url)
+        if cobalt_data:
+            logger.info(f"[{request_id or 'anon'}] Facebook extracted successfully via Cobalt pipeline")
+            return cobalt_data
 
     ydl_opts: Dict[str, Any] = {
         "skip_download": True,
@@ -461,14 +470,20 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
     except Exception as e:
         logger.warning(f"[{request_id or 'anon'}] yt-dlp extraction failed for {detected_platform} ({target_extract_url}): {e}")
 
-        # If Facebook fails in yt-dlp, trigger direct HTML scraper fallback
+        # Universal fallback to Cobalt engine if yt-dlp failed
+        cobalt_data = extract_cobalt_media(target_extract_url) or extract_cobalt_media(resolved_url)
+        if cobalt_data:
+            logger.info(f"[{request_id or 'anon'}] {detected_platform} Cobalt fallback succeeded")
+            return cobalt_data
+
+        # If Facebook fails in yt-dlp and Cobalt, trigger direct HTML scraper fallback
         if detected_platform == "Facebook":
             fb_data = extract_facebook_direct_metadata(resolved_url)
             if fb_data:
                 logger.info(f"[{request_id or 'anon'}] Facebook direct HTML fallback succeeded")
                 return fb_data
 
-        # If TikTok was bypassed or failed earlier, recheck
+        # If TikTok was bypassed or failed earlier, recheck TikWM
         if detected_platform == "TikTok":
             tt_data = extract_tiktok_metadata(resolved_url)
             if tt_data:

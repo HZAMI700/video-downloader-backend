@@ -3,6 +3,7 @@ import glob
 import logging
 import mimetypes
 import os
+import re
 import subprocess
 import threading
 import time
@@ -13,6 +14,7 @@ import requests
 import yt_dlp
 from app.config import settings
 from app.security import sanitize_filename, detect_media_platform, resolve_shortlink_url
+from app.services.cobalt_service import extract_cobalt_media
 from app.services.ytdlp_service import (
     check_ffmpeg_installed,
     extract_pinterest_metadata,
@@ -62,6 +64,89 @@ class DownloadJob:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
         }
+
+
+def stream_direct_media_to_file(
+    job: DownloadJob,
+    direct_url: str,
+    title: str,
+    is_audio: bool,
+    ffmpeg_available: bool,
+    start_time: float,
+    temp_dir: Path,
+    max_bytes: int,
+) -> bool:
+    """
+    Download a direct progressive media stream in chunks, updating job progress in real time.
+    Transcodes to 320kbps MP3 if audio is requested and FFmpeg is present.
+    """
+    title_sanitized = sanitize_filename(title, default=f"{job.platform.lower()}_media")
+    temp_part = temp_dir / f"{job.job_id}_{title_sanitized}.part"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+    }
+
+    try:
+        r = requests.get(direct_url, headers=headers, stream=True, timeout=35)
+        r.raise_for_status()
+
+        total_len = int(r.headers.get("content-length", 0))
+        job.total_bytes = total_len if total_len > 0 else None
+        downloaded = 0
+
+        with open(temp_part, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                job.downloaded_bytes = downloaded
+                if downloaded > max_bytes:
+                    raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
+                if total_len > 0:
+                    job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
+
+        if is_audio:
+            if not ffmpeg_available:
+                if direct_url.endswith((".mp3", ".m4a", ".aac")) or "audio" in r.headers.get("content-type", ""):
+                    final_path = temp_dir / f"{job.job_id}_{title_sanitized}.mp3"
+                    temp_part.replace(final_path)
+                    job.content_type = "audio/mpeg"
+                else:
+                    raise Exception("MP3 audio extraction requires FFmpeg, which is not available.")
+            else:
+                mp3_path = temp_dir / f"{job.job_id}_{title_sanitized}.mp3"
+                cmd = ["ffmpeg", "-y", "-i", str(temp_part), "-vn", "-c:a", "libmp3lame", "-b:a", "320k", str(mp3_path)]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                if res.returncode != 0:
+                    raise Exception(f"FFmpeg audio extraction failed: {res.stderr.decode('utf-8', errors='ignore')}")
+                if temp_part.exists():
+                    temp_part.unlink(missing_ok=True)
+                final_path = mp3_path
+                job.content_type = "audio/mpeg"
+        else:
+            final_mp4 = temp_dir / f"{job.job_id}_{title_sanitized}.mp4"
+            temp_part.replace(final_mp4)
+            final_path = final_mp4
+            job.content_type = "video/mp4"
+
+        job.file_path = str(final_path)
+        job.file_size = os.path.getsize(final_path)
+        job.filename = sanitize_filename(final_path.name[len(job.job_id) + 1:])
+        job.progress_percent = 100.0
+        job.status = "completed"
+        job.completed_at = time.time()
+        elapsed = round(job.completed_at - start_time, 2)
+        logger.info(f"Download SUCCESS for direct stream job {job.job_id} [{job.platform}]: {job.file_size} bytes in {elapsed}s")
+        return True
+
+    except Exception as e:
+        logger.warning(f"Direct stream download failed for {job.job_id} [{job.platform}]: {e}")
+        if temp_part.exists():
+            temp_part.unlink(missing_ok=True)
+        return False
 
 
 class JobManager:
@@ -150,127 +235,65 @@ class JobManager:
             if job.platform == "Pinterest":
                 try:
                     p_data = extract_pinterest_metadata(job.url)
-                    direct_url = p_data.get("direct_media_url")
-                    if not direct_url:
-                        raise Exception("No direct media stream found for this Pinterest video.")
-
-                    title_sanitized = sanitize_filename(p_data.get("title", "pinterest_video"))
-                    final_mp4 = temp_dir / f"{job_id}_{title_sanitized}.mp4"
-
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept": "*/*",
-                    }
-
-                    r = requests.get(direct_url, headers=headers, stream=True, timeout=30)
-                    r.raise_for_status()
-
-                    total_len = int(r.headers.get("content-length", 0))
-                    job.total_bytes = total_len if total_len > 0 else None
-                    downloaded = 0
-
-                    with open(final_mp4, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=65536):
-                            if not chunk:
-                                continue
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            job.downloaded_bytes = downloaded
-                            if downloaded > max_bytes:
-                                raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
-                            if total_len > 0:
-                                job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
-
-                    # Audio conversion if requested
-                    if job.format_id == "audio_mp3":
-                        if not ffmpeg_available:
-                            raise Exception("MP3 audio extraction requires FFmpeg, which is not available.")
-                        mp3_path = temp_dir / f"{job_id}_{title_sanitized}.mp3"
-                        cmd = ["ffmpeg", "-y", "-i", str(final_mp4), "-vn", "-c:a", "libmp3lame", "-b:a", "320k", str(mp3_path)]
-                        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-                        if res.returncode != 0:
-                            raise Exception(f"FFmpeg audio extraction failed: {res.stderr.decode('utf-8', errors='ignore')}")
-                        if os.path.exists(final_mp4):
-                            os.remove(final_mp4)
-                        output_path = mp3_path
-                        job.content_type = "audio/mpeg"
-                    else:
-                        output_path = final_mp4
-                        job.content_type = "video/mp4"
-
-                    job.file_path = str(output_path)
-                    job.file_size = os.path.getsize(output_path)
-                    job.filename = sanitize_filename(output_path.name[len(job_id) + 1:])
-                    job.progress_percent = 100.0
-                    job.status = "completed"
-                    job.completed_at = time.time()
-                    elapsed = round(job.completed_at - start_time, 2)
-                    logger.info(f"Download SUCCESS for Pinterest job {job_id}: {job.file_size} bytes in {elapsed}s")
-                    return
-
+                    if p_data and p_data.get("direct_media_url"):
+                        is_audio = job.format_id == "audio_mp3"
+                        if stream_direct_media_to_file(job, p_data["direct_media_url"], p_data.get("title", "pinterest_video"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
                 except Exception as e:
-                    err_text = str(e)
-                    elapsed = round(time.time() - start_time, 2)
-                    logger.error(f"Download FAILED for Pinterest job {job_id} after {elapsed}s: {err_text}")
-                    job.status = "failed"
-                    job.error_message = err_text if "exceeds the server limit" in err_text else "Failed to download Pinterest video."
-                    return
+                    logger.warning(f"Pinterest streaming failed for {job.job_id}: {e}")
 
-            # --- DEDICATED TIKTOK STREAMING DOWNLOAD HANDLER ---
+            # --- DEDICATED TIKTOK DOWNLOAD HANDLER (TikWM + Cobalt) ---
             if job.platform == "TikTok":
+                is_audio = job.format_id == "audio_mp3"
+                # Tier 1: TikWM Direct Stream
                 try:
                     tt_data = extract_tiktok_metadata(job.url)
                     if tt_data:
                         direct_url = None
-                        is_audio = job.format_id == "audio_mp3"
                         for f in tt_data.get("formats", []):
                             if f.get("format_id") == job.format_id and f.get("direct_url"):
                                 direct_url = f.get("direct_url")
                                 break
                         if not direct_url:
                             direct_url = tt_data.get("direct_media_url")
-
-                        if direct_url:
-                            title_sanitized = sanitize_filename(tt_data.get("title", "tiktok_video"))
-                            ext = "mp3" if is_audio else "mp4"
-                            final_file = temp_dir / f"{job_id}_{title_sanitized}.{ext}"
-
-                            headers = {
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                "Accept": "*/*",
-                            }
-
-                            r = requests.get(direct_url, headers=headers, stream=True, timeout=30)
-                            r.raise_for_status()
-
-                            total_len = int(r.headers.get("content-length", 0))
-                            job.total_bytes = total_len if total_len > 0 else None
-                            downloaded = 0
-
-                            with open(final_file, "wb") as f:
-                                for chunk in r.iter_content(chunk_size=65536):
-                                    if not chunk:
-                                        continue
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    job.downloaded_bytes = downloaded
-                                    if downloaded > max_bytes:
-                                        raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
-                                    if total_len > 0:
-                                        job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
-
-                            job.file_path = str(final_file)
-                            job.file_size = os.path.getsize(final_file)
-                            job.filename = sanitize_filename(final_file.name[len(job_id) + 1:])
-                            job.content_type = "audio/mpeg" if is_audio else "video/mp4"
-                            job.progress_percent = 100.0
-                            job.status = "completed"
-                            job.completed_at = time.time()
-                            elapsed = round(job.completed_at - start_time, 2)
-                            logger.info(f"Download SUCCESS for TikTok job {job_id}: {job.file_size} bytes in {elapsed}s")
+                        if direct_url and stream_direct_media_to_file(job, direct_url, tt_data.get("title", "tiktok_video"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
                             return
                 except Exception as e:
-                    logger.warning(f"TikTok streaming download failed for job {job_id}, attempting yt-dlp fallback: {e}")
+                    logger.warning(f"TikTok TikWM direct stream failed for {job.job_id}: {e}")
+
+                # Tier 2: Cobalt Engine (no watermark high speed)
+                try:
+                    cobalt_data = extract_cobalt_media(job.url)
+                    if cobalt_data and cobalt_data.get("direct_media_url"):
+                        if stream_direct_media_to_file(job, cobalt_data["direct_media_url"], cobalt_data.get("title", "tiktok_video"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
+                except Exception as e:
+                    logger.warning(f"TikTok Cobalt direct stream failed for {job.job_id}: {e}")
+
+            # --- DEDICATED FACEBOOK DOWNLOAD HANDLER (Cobalt + Direct Scraper) ---
+            if job.platform == "Facebook":
+                is_audio = job.format_id == "audio_mp3"
+                # Tier 1: Cobalt Engine (1080p/720p direct stream)
+                try:
+                    fb_target = job.url
+                    reel_m = re.search(r'facebook\.com/reel/(\d+)', job.url)
+                    if reel_m:
+                        fb_target = f"https://www.facebook.com/watch/?v={reel_m.group(1)}"
+                    cobalt_data = extract_cobalt_media(fb_target) or extract_cobalt_media(job.url)
+                    if cobalt_data and cobalt_data.get("direct_media_url"):
+                        if stream_direct_media_to_file(job, cobalt_data["direct_media_url"], cobalt_data.get("title", "facebook_video"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
+                except Exception as e:
+                    logger.warning(f"Facebook Cobalt stream download failed for {job.job_id}: {e}")
+
+                # Tier 2: Direct Facebook HTML Scraper
+                try:
+                    fb_data = extract_facebook_direct_metadata(job.url)
+                    if fb_data and fb_data.get("direct_media_url"):
+                        if stream_direct_media_to_file(job, fb_data["direct_media_url"], fb_data.get("title", "facebook_video"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
+                except Exception as e:
+                    logger.warning(f"Facebook direct scraper download failed for {job.job_id}: {e}")
 
             # --- STANDARD YT-DLP DOWNLOAD HANDLER (YouTube, TikTok, Facebook, Instagram) ---
             target_url = resolve_shortlink_url(job.url)
@@ -410,65 +433,25 @@ class JobManager:
                 err_text = str(e)
                 logger.warning(f"Standard yt-dlp download failed for job {job_id} [{job.platform}]: {err_text}")
 
+                # Universal Fallback: Cobalt Engine if yt-dlp failed during download
+                try:
+                    cobalt_fallback = extract_cobalt_media(job.url)
+                    if cobalt_fallback and cobalt_fallback.get("direct_media_url"):
+                        is_audio = job.format_id == "audio_mp3"
+                        if stream_direct_media_to_file(job, cobalt_fallback["direct_media_url"], cobalt_fallback.get("title", "media"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
+                except Exception as cob_err:
+                    logger.warning(f"Cobalt universal download fallback failed for {job_id}: {cob_err}")
+
                 # If Facebook yt-dlp download failed, attempt direct HTML scraper fallback
                 if job.platform == "Facebook":
                     try:
                         logger.info(f"Attempting direct Facebook fallback download for job {job_id}...")
                         fb_data = extract_facebook_direct_metadata(job.url)
                         if fb_data and fb_data.get("direct_media_url"):
-                            direct_url = fb_data["direct_media_url"]
-                            title_sanitized = sanitize_filename(fb_data.get("title", "facebook_video"))
-                            final_mp4 = temp_dir / f"{job_id}_{title_sanitized}.mp4"
-
-                            headers = {
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                "Accept": "*/*",
-                            }
-
-                            r = requests.get(direct_url, headers=headers, stream=True, timeout=30)
-                            r.raise_for_status()
-
-                            total_len = int(r.headers.get("content-length", 0))
-                            job.total_bytes = total_len if total_len > 0 else None
-                            downloaded = 0
-
-                            with open(final_mp4, "wb") as f:
-                                for chunk in r.iter_content(chunk_size=65536):
-                                    if not chunk:
-                                        continue
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    job.downloaded_bytes = downloaded
-                                    if downloaded > max_bytes:
-                                        raise Exception(f"File size exceeds the server limit of {settings.MAX_FILE_SIZE_MB}MB.")
-                                    if total_len > 0:
-                                        job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
-
-                            if job.format_id == "audio_mp3" and ffmpeg_available:
-                                mp3_path = temp_dir / f"{job_id}_{title_sanitized}.mp3"
-                                cmd = ["ffmpeg", "-y", "-i", str(final_mp4), "-vn", "-c:a", "libmp3lame", "-b:a", "320k", str(mp3_path)]
-                                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-                                if res.returncode == 0:
-                                    if os.path.exists(final_mp4):
-                                        os.remove(final_mp4)
-                                    output_path = mp3_path
-                                    job.content_type = "audio/mpeg"
-                                else:
-                                    output_path = final_mp4
-                                    job.content_type = "video/mp4"
-                            else:
-                                output_path = final_mp4
-                                job.content_type = "video/mp4"
-
-                            job.file_path = str(output_path)
-                            job.file_size = os.path.getsize(output_path)
-                            job.filename = sanitize_filename(output_path.name[len(job_id) + 1:])
-                            job.progress_percent = 100.0
-                            job.status = "completed"
-                            job.completed_at = time.time()
-                            elapsed = round(job.completed_at - start_time, 2)
-                            logger.info(f"Download SUCCESS for Facebook direct fallback job {job_id}: {job.file_size} bytes in {elapsed}s")
-                            return
+                            is_audio = job.format_id == "audio_mp3"
+                            if stream_direct_media_to_file(job, fb_data["direct_media_url"], fb_data.get("title", "facebook_video"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                                return
                     except Exception as fb_err:
                         logger.warning(f"Facebook direct fallback also failed for job {job_id}: {fb_err}")
 
