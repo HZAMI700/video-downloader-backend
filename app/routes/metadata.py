@@ -13,7 +13,7 @@ class MetadataRequest(BaseModel):
 
 class FormatOptionSchema(BaseModel):
     format_id: str
-    type: str  # video or audio
+    type: str  # video, audio, or image
     label: str
     resolution: str
     ext: str
@@ -21,6 +21,7 @@ class FormatOptionSchema(BaseModel):
     requires_ffmpeg: bool = False
     available: bool = True
     approx_size_bytes: Optional[int] = None
+    direct_url: Optional[str] = None
 
 
 class MetadataResponse(BaseModel):
@@ -35,6 +36,7 @@ class MetadataResponse(BaseModel):
     original_url: str
     formats: List[FormatOptionSchema]
     ffmpeg_available: bool
+    direct_media_url: Optional[str] = None
 
 
 @router.post("/metadata", response_model=MetadataResponse)

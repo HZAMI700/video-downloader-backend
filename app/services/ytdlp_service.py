@@ -1,7 +1,9 @@
 import logging
+import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 import requests
 import yt_dlp
@@ -13,6 +15,42 @@ from app.services.cobalt_service import extract_cobalt_media
 logger = logging.getLogger("video_downloader.ytdlp")
 
 _FFMPEG_AVAILABLE: Optional[bool] = None
+
+
+def find_cookies_file() -> Optional[str]:
+    """
+    Search for a valid cookies file or write COOKIES_TEXT if provided via environment variable.
+    Supports Netscape cookies format exported from browsers for Instagram, YouTube, etc.
+    """
+    # 1. Check if COOKIES_TEXT environment variable is set
+    cookies_text = os.getenv("COOKIES_TEXT")
+    if cookies_text and cookies_text.strip():
+        try:
+            target_path = settings.temp_dir_path / "imported_cookies.txt"
+            target_path.write_text(cookies_text.strip(), encoding="utf-8")
+            return str(target_path)
+        except Exception as e:
+            logger.warning(f"Failed to write COOKIES_TEXT to file: {e}")
+
+    # 2. Check explicit COOKIES_FILE env var
+    env_file = os.getenv("COOKIES_FILE")
+    if env_file and os.path.isfile(env_file):
+        return env_file
+
+    # 3. Check well-known local paths
+    candidates = [
+        Path("cookies.txt"),
+        Path(__file__).resolve().parent.parent.parent / "cookies.txt",
+        settings.temp_dir_path.parent / "cookies.txt",
+        settings.temp_dir_path / "cookies.txt",
+        Path("instagram_cookies.txt"),
+        Path(__file__).resolve().parent.parent.parent / "instagram_cookies.txt",
+    ]
+    for c in candidates:
+        if c.is_file() and c.stat().st_size > 0:
+            return str(c.resolve())
+
+    return None
 
 
 def check_ffmpeg_installed() -> bool:
@@ -228,6 +266,9 @@ def classify_extraction_error(e: Exception, platform: str, url: str) -> HTTPExce
 
     if "unsupported url" in msg.lower():
         return HTTPException(status_code=400, detail=f"The URL provided is not a supported {platform} media link.")
+
+    if "instagram sent an empty media response" in msg.lower() or "login_required" in msg.lower():
+        return HTTPException(status_code=403, detail="Instagram requires account authentication to view this post. Please ensure the post is public.")
 
     return HTTPException(status_code=400, detail=f"Unable to extract video details from {platform}. The media may be restricted or in an unsupported format.")
 
@@ -463,6 +504,18 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
         },
     }
 
+    cookie_file = find_cookies_file()
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+        logger.info(f"[{request_id or 'anon'}] Using cookies file: {cookie_file}")
+
+    # 4. For Instagram, attempt high-speed Cobalt engine first if no cookies file is configured
+    if detected_platform == "Instagram" and not cookie_file:
+        cobalt_data = extract_cobalt_media(resolved_url)
+        if cobalt_data:
+            logger.info(f"[{request_id or 'anon'}] Instagram extracted successfully via Cobalt pipeline")
+            return cobalt_data
+
     info = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -494,6 +547,16 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
     if not info:
         raise HTTPException(status_code=404, detail=f"No media information found for the requested {detected_platform} URL.")
 
+    # Handle playlist/carousel posts (common for Instagram /p/ posts with multiple photos or videos)
+    if "entries" in info and info["entries"]:
+        entries = [e for e in info["entries"] if e]
+        if entries:
+            first_entry = entries[0]
+            for k in ("title", "id", "thumbnail", "uploader", "view_count", "duration"):
+                if not first_entry.get(k) and info.get(k):
+                    first_entry[k] = info[k]
+            info = first_entry
+
     # Process formats
     raw_formats = info.get("formats", [])
     duration_sec = info.get("duration")
@@ -504,6 +567,7 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
     # Collect available video resolutions
     video_map: Dict[str, Dict[str, Any]] = {}
     best_single_format: Optional[Dict[str, Any]] = None
+    has_video_track = False
 
     for f in raw_formats:
         vcodec = f.get("vcodec", "none")
@@ -517,6 +581,9 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
         is_audio = acodec != "none"
         is_direct = is_video and is_audio
 
+        if is_video:
+            has_video_track = True
+
         # For vertical videos (Reels, TikTok, Shorts), the shorter dimension indicates the standard quality scale (e.g. 1080x1920 is 1080p)
         effective_height = min(width, height) if (width and height) else height
 
@@ -524,9 +591,11 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
         if "hd" in f_id.lower() and not effective_height:
             effective_height = 1080
             is_video = True
+            has_video_track = True
         elif "sd" in f_id.lower() and not effective_height:
             effective_height = 480
             is_video = True
+            has_video_track = True
 
         if is_video and effective_height:
             res_key = f"{effective_height}p"
@@ -541,63 +610,104 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
             if not best_single_format or (effective_height and effective_height > (best_single_format.get("height") or 0)):
                 best_single_format = f
 
-    # Standard desired qualities: 1080p, 720p, 480p, 360p
-    target_resolutions = ["1080p", "720p", "480p", "360p"]
+    # Check if this is an image / photo post (common for Instagram /p/ photo posts)
+    is_image_post = (
+        not has_video_track
+        or info.get("is_video") is False
+        or info.get("ext") in ("jpg", "jpeg", "png", "webp")
+    )
+    direct_image_url = info.get("url") or info.get("thumbnail")
+    if not direct_image_url and info.get("thumbnails"):
+        thumbs = sorted(info["thumbnails"], key=lambda t: (t.get("width") or 0) * (t.get("height") or 0), reverse=True)
+        if thumbs:
+            direct_image_url = thumbs[0].get("url")
 
-    for res in target_resolutions:
-        h = int(res.replace("p", ""))
-        # Check if platform has this resolution or higher (downsampling is supported if ffmpeg exists)
-        available_matching = [k for k, v in video_map.items() if v["height"] >= h]
-        exact_match = res in video_map
-
-        if exact_match or (ffmpeg_available and available_matching):
-            vf = video_map.get(res) or video_map[available_matching[0]]
-            requires_ffmpeg = not vf.get("is_direct", False)
-
-            # Determine file size
-            est_size = vf.get("filesize") or estimate_size_bytes(duration_sec, h)
-
-            processed_formats.append({
-                "format_id": f"video_{res}",
-                "type": "video",
-                "label": f"MP4 {res}",
-                "resolution": res,
-                "ext": "mp4",
-                "quality_note": "Full High Definition" if h >= 1080 else "High Definition" if h >= 720 else "Standard Definition",
-                "requires_ffmpeg": requires_ffmpeg,
-                "available": ffmpeg_available or vf.get("is_direct", True),
-                "approx_size_bytes": est_size,
-            })
-            seen_resolutions.add(res)
-
-    # If no standard resolutions matched (common for TikTok or direct video links)
-    if not processed_formats:
-        est_size = (best_single_format.get("filesize") if best_single_format else None) or estimate_size_bytes(duration_sec, 720)
+    if is_image_post and direct_image_url:
+        w = info.get("width")
+        h = info.get("height")
+        res_label = f"{w}x{h}" if (w and h) else "HD"
         processed_formats.append({
-            "format_id": "best_video",
-            "type": "video",
-            "label": "MP4 (Best Quality)",
-            "resolution": "HD",
-            "ext": "mp4",
-            "quality_note": "Original Platform Quality",
+            "format_id": "image_orig",
+            "type": "image",
+            "label": "Original Photo (High Definition)",
+            "resolution": res_label,
+            "ext": "jpg",
+            "quality_note": "Original Image File",
             "requires_ffmpeg": False,
             "available": True,
-            "approx_size_bytes": est_size,
+            "approx_size_bytes": 2 * 1024 * 1024,
+            "direct_url": direct_image_url,
         })
+        processed_formats.append({
+            "format_id": "image_hd",
+            "type": "image",
+            "label": "JPEG Image (Standard Quality)",
+            "resolution": "Standard",
+            "ext": "jpg",
+            "quality_note": "Compressed Web JPEG",
+            "requires_ffmpeg": False,
+            "available": True,
+            "approx_size_bytes": 1024 * 1024,
+            "direct_url": direct_image_url,
+        })
+    else:
+        # Standard desired qualities: 1080p, 720p, 480p, 360p
+        target_resolutions = ["1080p", "720p", "480p", "360p"]
 
-    # Audio option: MP3 320kbps
-    mp3_size = estimate_size_bytes(duration_sec, 0)
-    processed_formats.append({
-        "format_id": "audio_mp3",
-        "type": "audio",
-        "label": "MP3 (320kbps)",
-        "resolution": "320kbps",
-        "ext": "mp3",
-        "quality_note": "High Bitrate Crystal Audio",
-        "requires_ffmpeg": True,
-        "available": True,
-        "approx_size_bytes": mp3_size,
-    })
+        for res in target_resolutions:
+            h = int(res.replace("p", ""))
+            # Check if platform has this resolution or higher (downsampling is supported if ffmpeg exists)
+            available_matching = [k for k, v in video_map.items() if v["height"] >= h]
+            exact_match = res in video_map
+
+            if exact_match or (ffmpeg_available and available_matching):
+                vf = video_map.get(res) or video_map[available_matching[0]]
+                requires_ffmpeg = not vf.get("is_direct", False)
+
+                # Determine file size
+                est_size = vf.get("filesize") or estimate_size_bytes(duration_sec, h)
+
+                processed_formats.append({
+                    "format_id": f"video_{res}",
+                    "type": "video",
+                    "label": f"MP4 {res}",
+                    "resolution": res,
+                    "ext": "mp4",
+                    "quality_note": "Full High Definition" if h >= 1080 else "High Definition" if h >= 720 else "Standard Definition",
+                    "requires_ffmpeg": requires_ffmpeg,
+                    "available": ffmpeg_available or vf.get("is_direct", True),
+                    "approx_size_bytes": est_size,
+                })
+                seen_resolutions.add(res)
+
+        # If no standard resolutions matched (common for TikTok or direct video links)
+        if not processed_formats:
+            est_size = (best_single_format.get("filesize") if best_single_format else None) or estimate_size_bytes(duration_sec, 720)
+            processed_formats.append({
+                "format_id": "best_video",
+                "type": "video",
+                "label": "MP4 (Best Quality)",
+                "resolution": "HD",
+                "ext": "mp4",
+                "quality_note": "Original Platform Quality",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": est_size,
+            })
+
+        # Audio option: MP3 320kbps
+        mp3_size = estimate_size_bytes(duration_sec, 0)
+        processed_formats.append({
+            "format_id": "audio_mp3",
+            "type": "audio",
+            "label": "MP3 (320kbps)",
+            "resolution": "320kbps",
+            "ext": "mp3",
+            "quality_note": "High Bitrate Crystal Audio",
+            "requires_ffmpeg": True,
+            "available": True,
+            "approx_size_bytes": mp3_size,
+        })
 
     platform_title = detected_platform if detected_platform != "Web Media" else (info.get("extractor_key") or "Web Media")
     dur_int = int(round(duration_sec)) if duration_sec is not None else None
@@ -605,7 +715,7 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
     return {
         "id": str(info.get("id", "")),
         "title": info.get("title") or "Untitled Media",
-        "thumbnail": info.get("thumbnail"),
+        "thumbnail": info.get("thumbnail") or direct_image_url,
         "duration": dur_int,
         "duration_formatted": format_duration(dur_int),
         "uploader": info.get("uploader") or info.get("channel") or info.get("creator") or "Unknown Creator",
@@ -614,4 +724,5 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
         "original_url": url,
         "formats": processed_formats,
         "ffmpeg_available": ffmpeg_available,
+        "direct_media_url": direct_image_url if is_image_post else (best_single_format.get("url") if best_single_format else None),
     }

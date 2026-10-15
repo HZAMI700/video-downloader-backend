@@ -123,9 +123,14 @@ def resolve_shortlink_url(url: str, timeout: int = 5) -> str:
         or ("facebook.com" in hostname and "/share/" in url_str)
         or ("tiktok.com" in hostname and "/t/" in url_str)
         or "youtu.be" in hostname
+        or ("instagram.com" in hostname and "/share/" in url_str)
+        or "instagr.am" in hostname
     )
 
     if not needs_resolve:
+        # Clean tracking params from instagram urls even if no redirect
+        if "instagram.com" in hostname:
+            return re.sub(r'(\?|\&)(igsh|utm_[^&=]+)=[^&#]*', '', url_str).rstrip('?&')
         return url_str
 
     headers = {
@@ -159,8 +164,13 @@ def resolve_shortlink_url(url: str, timeout: int = 5) -> str:
                 break
             if "tiktok.com/@" in current and "/video/" in current:
                 break
+            if "instagram.com/p/" in current or "instagram.com/reel/" in current:
+                break
     except Exception:
         pass
+
+    if "instagram.com" in current:
+        current = re.sub(r'(\?|\&)(igsh|utm_[^&=]+)=[^&#]*', '', current).rstrip('?&')
 
     return current
 

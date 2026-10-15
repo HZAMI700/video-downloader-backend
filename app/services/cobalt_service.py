@@ -117,31 +117,62 @@ def extract_cobalt_media(url: str, is_audio_only: bool = False) -> Optional[Dict
             # Multi-item post (e.g. photos/videos)
             items = res["picker"]
             if items and items[0].get("url"):
-                first_url = items[0]["url"]
+                first_item = items[0]
+                first_url = first_item["url"]
+                first_thumb = first_item.get("thumb")
+                is_photo = first_item.get("type") == "photo"
+
+                formats = []
+                if is_photo:
+                    formats.append({
+                        "format_id": "image_orig",
+                        "type": "image",
+                        "label": "Original Photo (High Definition)",
+                        "resolution": "HD",
+                        "ext": "jpg",
+                        "quality_note": "Original Image File",
+                        "requires_ffmpeg": False,
+                        "available": True,
+                        "approx_size_bytes": 2 * 1024 * 1024,
+                        "direct_url": first_url,
+                    })
+                else:
+                    formats.append({
+                        "format_id": "video_1080p",
+                        "type": "video",
+                        "label": f"MP4 1080p Full HD{' (No Watermark)' if platform == 'TikTok' else ''}",
+                        "resolution": "1080p",
+                        "ext": "mp4",
+                        "quality_note": "High Bitrate Direct Stream",
+                        "requires_ffmpeg": False,
+                        "available": True,
+                        "approx_size_bytes": 15 * 1024 * 1024,
+                        "direct_url": first_url,
+                    })
+                    formats.append({
+                        "format_id": "best_video",
+                        "type": "video",
+                        "label": "MP4 (Best Quality)",
+                        "resolution": "HD",
+                        "ext": "mp4",
+                        "quality_note": "Direct Media Stream",
+                        "requires_ffmpeg": False,
+                        "available": True,
+                        "approx_size_bytes": 10 * 1024 * 1024,
+                        "direct_url": first_url,
+                    })
+
                 return {
                     "id": f"cobalt_{platform.lower()}",
                     "title": f"{platform} Media",
-                    "thumbnail": items[0].get("thumb"),
+                    "thumbnail": first_thumb or (first_url if is_photo else None),
                     "duration": None,
                     "duration_formatted": None,
                     "uploader": f"{platform} Creator",
                     "view_count": None,
                     "platform": platform,
                     "original_url": resolved_url,
-                    "formats": [
-                        {
-                            "format_id": "best_video",
-                            "type": "video",
-                            "label": "MP4 (Best Quality)",
-                            "resolution": "HD",
-                            "ext": "mp4",
-                            "quality_note": "Direct Media Stream",
-                            "requires_ffmpeg": False,
-                            "available": True,
-                            "approx_size_bytes": 10 * 1024 * 1024,
-                            "direct_url": first_url,
-                        }
-                    ],
+                    "formats": formats,
                     "ffmpeg_available": True,
                     "direct_media_url": first_url,
                 }

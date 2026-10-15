@@ -20,6 +20,7 @@ from app.services.ytdlp_service import (
     extract_pinterest_metadata,
     extract_tiktok_metadata,
     extract_facebook_direct_metadata,
+    find_cookies_file,
 )
 
 logger = logging.getLogger("video_downloader.job_manager")
@@ -79,6 +80,7 @@ def stream_direct_media_to_file(
     """
     Download a direct progressive media stream in chunks, updating job progress in real time.
     Transcodes to 320kbps MP3 if audio is requested and FFmpeg is present.
+    Saves image streams as JPG when image format is requested.
     """
     title_sanitized = sanitize_filename(title, default=f"{job.platform.lower()}_media")
     temp_part = temp_dir / f"{job.job_id}_{title_sanitized}.part"
@@ -108,7 +110,18 @@ def stream_direct_media_to_file(
                 if total_len > 0:
                     job.progress_percent = min(99.0, (downloaded / total_len) * 100.0)
 
-        if is_audio:
+        is_image = (
+            job.format_id.startswith("image")
+            or direct_url.lower().split("?")[0].endswith((".jpg", ".jpeg", ".png", ".webp"))
+            or r.headers.get("content-type", "").startswith("image/")
+        )
+
+        if is_image:
+            final_img = temp_dir / f"{job.job_id}_{title_sanitized}.jpg"
+            temp_part.replace(final_img)
+            final_path = final_img
+            job.content_type = "image/jpeg"
+        elif is_audio:
             if not ffmpeg_available:
                 if direct_url.endswith((".mp3", ".m4a", ".aac")) or "audio" in r.headers.get("content-type", ""):
                     final_path = temp_dir / f"{job.job_id}_{title_sanitized}.mp3"
@@ -295,6 +308,40 @@ class JobManager:
                 except Exception as e:
                     logger.warning(f"Facebook direct scraper download failed for {job.job_id}: {e}")
 
+            # --- DEDICATED INSTAGRAM DOWNLOAD HANDLER (Cobalt + Direct Photo Stream) ---
+            if job.platform == "Instagram":
+                is_audio = job.format_id == "audio_mp3"
+                # Tier 1: Cobalt Direct Stream (photos/reels)
+                try:
+                    cobalt_data = extract_cobalt_media(job.url)
+                    if cobalt_data and cobalt_data.get("direct_media_url"):
+                        if stream_direct_media_to_file(job, cobalt_data["direct_media_url"], cobalt_data.get("title", "instagram_post"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
+                except Exception as cob_err:
+                    logger.warning(f"Instagram Cobalt direct stream failed for {job.job_id}: {cob_err}")
+
+                # Tier 2: If requesting an image format, try yt-dlp metadata extraction to get direct photo URL
+                if job.format_id.startswith("image"):
+                    try:
+                        cookie_file = find_cookies_file()
+                        ydl_img_opts = {
+                            "skip_download": True,
+                            "quiet": True,
+                            "no_warnings": True,
+                        }
+                        if cookie_file:
+                            ydl_img_opts["cookiefile"] = cookie_file
+                        with yt_dlp.YoutubeDL(ydl_img_opts) as ydl:
+                            img_info = ydl.extract_info(job.url, download=False)
+                            if "entries" in img_info and img_info["entries"]:
+                                img_info = img_info["entries"][0]
+                            img_url = img_info.get("url") or img_info.get("thumbnail")
+                            if img_url:
+                                if stream_direct_media_to_file(job, img_url, img_info.get("title", "instagram_photo"), False, ffmpeg_available, start_time, temp_dir, max_bytes):
+                                    return
+                    except Exception as img_err:
+                        logger.warning(f"Instagram photo direct stream failed for {job.job_id}: {img_err}")
+
             # --- STANDARD YT-DLP DOWNLOAD HANDLER (YouTube, TikTok, Facebook, Instagram) ---
             target_url = resolve_shortlink_url(job.url)
             format_id = job.format_id
@@ -341,6 +388,8 @@ class JobManager:
                         })
                 elif format_id == "audio_m4a":
                     ydl_format = "bestaudio[ext=m4a]/bestaudio/best"
+                elif format_id.startswith("image"):
+                    ydl_format = "best/all"
 
             def progress_hook(d: Dict[str, Any]):
                 if d.get("status") == "downloading":
@@ -388,6 +437,11 @@ class JobManager:
                 }
             }
 
+            cookie_file = find_cookies_file()
+            if cookie_file:
+                ydl_opts["cookiefile"] = cookie_file
+                logger.info(f"Job {job_id} using cookies file: {cookie_file}")
+
             if postprocessors:
                 ydl_opts["postprocessors"] = postprocessors
 
@@ -416,8 +470,16 @@ class JobManager:
                     clean_name = base_name
 
                 job.filename = sanitize_filename(clean_name, default="downloaded_media")
-                mime_type, _ = mimetypes.guess_type(final_path)
-                job.content_type = mime_type or "application/octet-stream"
+
+                if final_path.lower().endswith((".jpg", ".jpeg")):
+                    job.content_type = "image/jpeg"
+                elif final_path.lower().endswith(".png"):
+                    job.content_type = "image/png"
+                elif final_path.lower().endswith(".webp"):
+                    job.content_type = "image/webp"
+                else:
+                    mime_type, _ = mimetypes.guess_type(final_path)
+                    job.content_type = mime_type or "application/octet-stream"
 
                 job.progress_percent = 100.0
                 job.status = "completed"
@@ -476,6 +538,8 @@ class JobManager:
                     job.error_message = f"This {job.platform} media requires account login."
                 elif "HTTP Error 403" in err_text:
                     job.error_message = f"Access to this {job.platform} media stream was restricted by the host."
+                elif "empty media response" in err_text.lower() or "login_required" in err_text.lower():
+                    job.error_message = "Instagram requires account authentication to download this post. Please ensure the post is public, or supply a cookies.txt file."
                 elif "FFmpeg" in err_text and not ffmpeg_available:
                     job.error_message = "This format requires FFmpeg conversion, which is currently unavailable."
                 elif "Unsupported URL" in err_text:

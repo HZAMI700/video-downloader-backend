@@ -142,3 +142,76 @@ def test_classify_extraction_error_messages():
     assert http_bot.status_code == 503
     assert "security challenge" in http_bot.detail.lower()
 
+    e_ig = Exception("ERROR: [Instagram] ABC: Instagram sent an empty media response. Check if this post is accessible in your browser without being logged-in.")
+    http_ig = classify_extraction_error(e_ig, "Instagram", "https://instagram.com/p/ABC/")
+    assert http_ig.status_code == 403
+    assert "authentication" in http_ig.detail.lower()
+
+
+def test_metadata_instagram_photo_post(client):
+    mock_ig_photo = {
+        "id": "DF2qM62tpn8",
+        "title": "Instagram Photo Post",
+        "thumbnail": "https://example.com/ig_photo.jpg",
+        "duration": None,
+        "duration_formatted": None,
+        "uploader": "photographer",
+        "view_count": 1000,
+        "platform": "Instagram",
+        "original_url": "https://www.instagram.com/p/DF2qM62tpn8/",
+        "formats": [
+            {
+                "format_id": "image_orig",
+                "type": "image",
+                "label": "Original Photo (High Definition)",
+                "resolution": "1080x1350",
+                "ext": "jpg",
+                "quality_note": "Original Image File",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": 2097152,
+                "direct_url": "https://example.com/ig_photo_orig.jpg"
+            },
+            {
+                "format_id": "image_hd",
+                "type": "image",
+                "label": "JPEG Image (Standard Quality)",
+                "resolution": "Standard",
+                "ext": "jpg",
+                "quality_note": "Compressed Web JPEG",
+                "requires_ffmpeg": False,
+                "available": True,
+                "approx_size_bytes": 1048576,
+                "direct_url": "https://example.com/ig_photo_hd.jpg"
+            }
+        ],
+        "ffmpeg_available": True,
+        "direct_media_url": "https://example.com/ig_photo_orig.jpg"
+    }
+    with patch("app.routes.metadata.extract_media_metadata", return_value=mock_ig_photo):
+        response = client.post("/api/metadata", json={"url": "https://www.instagram.com/p/DF2qM62tpn8/"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["platform"] == "Instagram"
+        assert len(data["formats"]) == 2
+        assert data["formats"][0]["type"] == "image"
+        assert data["formats"][0]["format_id"] == "image_orig"
+        assert data["direct_media_url"] == "https://example.com/ig_photo_orig.jpg"
+
+
+def test_find_cookies_file(tmp_path, monkeypatch):
+    from app.services.ytdlp_service import find_cookies_file
+    # Test with COOKIES_TEXT environment variable
+    monkeypatch.setenv("COOKIES_TEXT", "# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t1790000000\tsessionid\t123456")
+    cookie_path = find_cookies_file()
+    assert cookie_path is not None
+    assert "imported_cookies.txt" in cookie_path
+    with open(cookie_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "sessionid" in content
+
+    # Clean up env var
+    monkeypatch.delenv("COOKIES_TEXT", raising=False)
+
+
+
