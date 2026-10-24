@@ -377,3 +377,65 @@ async def execute_transcription(audio_path: Path, language: Optional[str] = None
         "in your backend environment (.env file). Botkeep free tier (2 GB RAM) requires external APIs "
         "to prevent memory exhaustion."
     )
+
+
+async def translate_text(text: str, target_language: str, source_language: str = "auto") -> str:
+    """
+    Translates transcript text into the target language using Groq ultra-fast LLM or OpenAI.
+    """
+    if not text or not text.strip():
+        return ""
+
+    if settings.GROQ_API_KEY:
+        headers = {
+            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        prompt = (
+            f"You are a professional audio translator. Translate the following text accurately into {target_language}. "
+            "Preserve tone, names, and punctuation. Return ONLY the translated text without commentary or preamble."
+        )
+        payload = {
+            "model": "qwen/qwen3.8-27b",
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text}
+            ],
+            "temperature": 0.2
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                res = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                # Fallback model if qwen is busy
+                payload["model"] = "openai/gpt-oss-20b"
+                res2 = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                if res2.status_code == 200:
+                    return res2.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"Groq translation error: {e}")
+
+    # Fallback to OpenAI if configured
+    if settings.OPENAI_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                res = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {"role": "system", "content": f"Translate into {target_language}. Return ONLY translated text."},
+                            {"role": "user", "content": text}
+                        ]
+                    }
+                )
+                if res.status_code == 200:
+                    return res.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"OpenAI translation error: {e}")
+
+    return text

@@ -30,6 +30,12 @@ class UrlTranscribeRequest(BaseModel):
     diarization: bool = False
 
 
+class TranslateRequest(BaseModel):
+    text: str
+    target_language: str
+    source_language: Optional[str] = "auto"
+
+
 @router.post("/upload")
 async def upload_and_transcribe(
     file: UploadFile = File(...),
@@ -90,6 +96,25 @@ async def upload_and_transcribe(
         "status": job.status,
         "filename": sanitized_name,
         "message": "File received and queued for transcription."
+    }
+
+
+@router.post("/translate")
+async def translate_text_endpoint(req: TranslateRequest):
+    """
+    Translate text or transcript into any target language (e.g. Spanish, Tamil, French, Arabic, German, Chinese).
+    """
+    clean_text = req.text.strip()
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Text to translate cannot be empty.")
+
+    from app.services.transcription_service import translate_text
+    translated = await translate_text(clean_text, req.target_language, req.source_language)
+    return {
+        "original_text": clean_text,
+        "translated_text": translated,
+        "target_language": req.target_language,
+        "source_language": req.source_language,
     }
 
 

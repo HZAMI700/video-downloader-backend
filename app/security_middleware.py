@@ -37,7 +37,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         if content_length:
             try:
                 cl_int = int(content_length)
-                if request.url.path.startswith("/api/transcribe/upload"):
+                if request.url.path.startswith("/api/transcribe/upload") or request.url.path.startswith("/api/audio/"):
                     max_allowed = settings.MAX_TRANSCRIPTION_FILE_SIZE_MB * 1024 * 1024
                     limit_desc = f"{settings.MAX_TRANSCRIPTION_FILE_SIZE_MB} MB"
                 else:
