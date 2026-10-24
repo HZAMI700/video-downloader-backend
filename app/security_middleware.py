@@ -5,6 +5,7 @@ from collections import defaultdict
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
+from app.config import settings
 
 logger = logging.getLogger("video_downloader.access")
 
@@ -31,16 +32,28 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             self._apply_security_headers(response, req_id)
             return response
 
-        # Enforce max content length on request body (1 MB max for metadata/json)
+        # Enforce max content length on request body
         content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > 1024 * 1024:
-            logger.warning(f"[{req_id}] Payload too large ({content_length} bytes) from {client_ip}")
-            response = JSONResponse(
-                status_code=413,
-                content={"detail": "Payload too large. Maximum allowed size is 1MB."}
-            )
-            self._apply_security_headers(response, req_id)
-            return response
+        if content_length:
+            try:
+                cl_int = int(content_length)
+                if request.url.path.startswith("/api/transcribe/upload"):
+                    max_allowed = settings.MAX_TRANSCRIPTION_FILE_SIZE_MB * 1024 * 1024
+                    limit_desc = f"{settings.MAX_TRANSCRIPTION_FILE_SIZE_MB} MB"
+                else:
+                    max_allowed = 10 * 1024 * 1024  # 10 MB for metadata / json
+                    limit_desc = "10 MB"
+
+                if cl_int > max_allowed:
+                    logger.warning(f"[{req_id}] Payload too large ({content_length} bytes) on {request.url.path} from {client_ip}")
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"detail": f"Payload too large. Maximum allowed size is {limit_desc}."}
+                    )
+                    self._apply_security_headers(response, req_id)
+                    return response
+            except (ValueError, TypeError):
+                pass
 
         # Rate Limiting
         now = time.time()
