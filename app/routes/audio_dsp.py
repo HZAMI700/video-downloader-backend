@@ -247,3 +247,59 @@ async def change_voice(
         media_type="audio/mpeg",
         filename=f"{stem}_{preset}_voice.mp3"
     )
+
+
+@router.post("/convert")
+async def convert_media_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    target_format: str = Form("mp3"),  # "mp3", "wav", "m4a", "aac"
+    bitrate: str = Form("320k"),        # "320k", "256k", "128k"
+):
+    """
+    Convert any uploaded audio or video file (MP4, MOV, MKV, WebM, etc.) to pure MP3 or WAV audio.
+    """
+    raw_filename = file.filename or "media_file"
+    sanitized = sanitize_filename(raw_filename)
+    stem = Path(sanitized).stem
+    ext = Path(sanitized).suffix.lower()
+
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported format '{ext}'.")
+
+    temp_dir = settings.temp_dir_path
+    uid = uuid.uuid4().hex[:8]
+    input_path = temp_dir / f"conv_in_{uid}_{sanitized}"
+
+    clean_fmt = target_format.lower().replace(".", "")
+    if clean_fmt not in {"mp3", "wav", "m4a", "aac", "flac"}:
+        clean_fmt = "mp3"
+
+    output_path = temp_dir / f"converted_{uid}_{stem}.{clean_fmt}"
+
+    try:
+        with open(input_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+
+        if clean_fmt == "wav":
+            cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-c:a", "pcm_s16le", str(output_path)]
+            media_type = "audio/wav"
+        else:
+            cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, str(output_path)]
+            media_type = "audio/mpeg"
+
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+        if proc.returncode != 0 or not output_path.exists():
+            logger.error(f"FFmpeg conversion failed: {proc.stderr.decode('utf-8', errors='ignore')}")
+            raise HTTPException(status_code=500, detail="Media conversion failed.")
+
+    finally:
+        remove_temp_file(input_path)
+
+    background_tasks.add_task(remove_temp_file, output_path)
+    return FileResponse(
+        path=output_path,
+        media_type=media_type,
+        filename=f"{stem}.{clean_fmt}"
+    )
