@@ -13,6 +13,7 @@ class CapabilitiesFeatures(BaseModel):
     video_muxing: bool
     direct_formats: bool
     resumable_downloads: bool
+    transcription: bool = True
 
 
 class CapabilitiesResponse(BaseModel):
@@ -54,7 +55,8 @@ def get_capabilities():
             audio_extraction=ffmpeg_ok,
             video_muxing=ffmpeg_ok,
             direct_formats=True,
-            resumable_downloads=False
+            resumable_downloads=False,
+            transcription=True,
         ),
         notes=(
             "FFmpeg is available: full high-definition muxing and MP3 conversion enabled."

@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     DOWNLOAD_TTL_SECONDS: int = 900  # 15 minutes file retention
     MAX_CONCURRENT_DOWNLOADS: int = 3
     TEMP_DOWNLOAD_DIR: str = os.getenv("TEMP_DOWNLOAD_DIR", get_default_temp_dir())
+
+    # Transcription settings
+    TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "auto")  # auto, groq, openai, deepgram, assemblyai
+    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY", None)
+    GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY", None)
+    DEEPGRAM_API_KEY: Optional[str] = os.getenv("DEEPGRAM_API_KEY", None)
+    ASSEMBLYAI_API_KEY: Optional[str] = os.getenv("ASSEMBLYAI_API_KEY", None)
+    MAX_TRANSCRIPTION_FILE_SIZE_MB: int = int(os.getenv("MAX_TRANSCRIPTION_FILE_SIZE_MB", "100"))
+    MAX_TRANSCRIPTION_DURATION_SECONDS: int = int(os.getenv("MAX_TRANSCRIPTION_DURATION_SECONDS", "3600"))  # 60 min limit
 
     model_config = SettingsConfigDict(
         env_file=".env",

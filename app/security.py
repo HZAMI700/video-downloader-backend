@@ -99,6 +99,9 @@ def is_safe_public_url(url_str: str) -> bool:
         return False
 
 
+is_safe_url = is_safe_public_url
+
+
 def resolve_shortlink_url(url: str, timeout: int = 5) -> str:
     """
     Resolve known shortlinks or share URLs (pin.it, vm.tiktok.com, fb.watch, facebook.com/share/)

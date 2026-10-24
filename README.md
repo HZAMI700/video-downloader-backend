@@ -27,8 +27,27 @@ A production-grade, secure media extraction and download API powered by **FastAP
 | `GET` | `/api/downloads/{job_id}` | Real-time job status, percentage, download speed, and ETA |
 | `GET` | `/api/downloads/{job_id}/file` | Streams the completed file with safe filename and headers |
 | `DELETE` | `/api/downloads/{job_id}` | Manually cleans up a completed or failed job and deletes disk files |
+| `POST` | `/api/transcribe/upload` | Uploads an audio/video file (up to 100MB) to transcribe with AI speech recognition |
+| `POST` | `/api/transcribe/url` | Ingests direct media link or video platform URL to extract audio and transcribe |
+| `GET` | `/api/transcribe/{job_id}` | Polls transcription progress, stage, detected language, and timestamped segments |
+| `GET` | `/api/transcribe/{job_id}/export` | Exports completed transcript as plain TXT, SRT subtitles, or WebVTT subtitles |
 
 Interactive Swagger documentation is available at `/docs` and ReDoc at `/redoc`.
+
+---
+
+## AI Speech Transcription Engine & Botkeep Free-Tier Constraints
+
+> [!IMPORTANT]
+> **Botkeep Cloud Free-Tier Resource Constraints:**
+> - CPU: 1.5 vCore
+> - Memory: 2 GB RAM
+> - Storage: 2 GB Disk
+>
+> Running local heavyweight PyTorch speech models (like `openai-whisper` or `faster-whisper` on CPU) would quickly allocate > 1.8-2.2 GB RAM, triggering immediate Out-Of-Memory (OOM) termination on Botkeep's container.
+> 
+> Therefore, this backend utilizes **external AI cloud speech APIs** (`GROQ_API_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, or `ASSEMBLYAI_API_KEY`). This keeps backend RAM usage < 150 MB and returns transcriptions in seconds.
+> All temporary uploaded files and extracted audio chunks are automatically deleted from disk immediately upon completion or failure to stay well within Botkeep's 2 GB disk envelope.
 
 ---
 

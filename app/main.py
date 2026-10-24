@@ -8,7 +8,9 @@ from app.routes.health import router as health_router
 from app.routes.capabilities import router as capabilities_router
 from app.routes.metadata import router as metadata_router
 from app.routes.downloads import router as downloads_router
+from app.routes.transcription import router as transcription_router
 from app.services.job_manager import job_manager
+from app.services.transcription_manager import transcription_manager
 from app.security_middleware import SecurityAndRateLimitMiddleware
 
 # Configure logging
@@ -25,6 +27,7 @@ async def periodic_cleanup():
         try:
             await asyncio.sleep(60)
             job_manager.cleanup_expired()
+            transcription_manager.cleanup_expired()
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -79,14 +82,16 @@ app.include_router(health_router)
 app.include_router(capabilities_router)
 app.include_router(metadata_router)
 app.include_router(downloads_router)
+app.include_router(transcription_router)
 
 
 @app.get("/")
 def root():
     return {
-        "service": "Video Downloader API",
+        "service": "Video Downloader & Audio Transcriber API",
         "status": "online",
         "documentation": "/docs",
         "health": "/healthz",
-        "capabilities": "/api/capabilities"
+        "capabilities": "/api/capabilities",
+        "transcription": "/api/transcribe"
     }
