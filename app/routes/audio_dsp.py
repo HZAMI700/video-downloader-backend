@@ -346,21 +346,41 @@ async def generate_speech(req: TtsRequest, background_tasks: BackgroundTasks):
             tts.save(str(raw_tts_path))
 
         speed = max(0.5, min(2.0, float(req.speed or 1.0)))
-        pitch = max(0.5, min(1.5, float(req.pitch or 1.0)))
+        user_pitch = max(0.5, min(1.5, float(req.pitch or 1.0)))
 
-        if (abs(speed - 1.0) > 0.05 or abs(pitch - 1.0) > 0.05) and check_ffmpeg_installed():
+        # Voice Profile Timbre Tuning based on voice_id
+        voice_id_clean = (req.voice_id or "").lower()
+        is_deep_male = any(name in voice_id_clean for name in ["adam", "marcus", "george", "charlie", "daniel", "clyde", "callum", "male", "deep"])
+        is_bright_female = any(name in voice_id_clean for name in ["rachel", "charlotte", "emily", "sophia", "bella", "freya", "elli", "female", "serena"])
+
+        base_voice_pitch = 1.0
+        if is_deep_male:
+            base_voice_pitch = 0.88
+        elif is_bright_female:
+            base_voice_pitch = 1.16
+
+        effective_pitch = user_pitch * base_voice_pitch
+
+        if check_ffmpeg_installed():
             audio_filters = []
-            if abs(pitch - 1.0) > 0.05:
-                sample_rate = int(24000 * pitch)
+            if abs(effective_pitch - 1.0) > 0.03:
+                sample_rate = int(24000 * effective_pitch)
                 audio_filters.append(f"asetrate={sample_rate},aresample=24000")
-            if abs(speed - 1.0) > 0.05:
+            if abs(speed - 1.0) > 0.03:
                 audio_filters.append(f"atempo={speed}")
+            if is_deep_male:
+                audio_filters.append("equalizer=f=120:t=q:w=1:g=3.5")
+            elif is_bright_female:
+                audio_filters.append("equalizer=f=3200:t=q:w=1:g=2.8")
 
-            filter_str = ",".join(audio_filters)
-            cmd = ["ffmpeg", "-y", "-i", str(raw_tts_path), "-af", filter_str, "-b:a", "192k", str(final_output_path)]
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
-            if proc.returncode == 0 and final_output_path.exists():
-                chosen_path = final_output_path
+            if audio_filters:
+                filter_str = ",".join(audio_filters)
+                cmd = ["ffmpeg", "-y", "-i", str(raw_tts_path), "-af", filter_str, "-b:a", "192k", str(final_output_path)]
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+                if proc.returncode == 0 and final_output_path.exists():
+                    chosen_path = final_output_path
+                else:
+                    chosen_path = raw_tts_path
             else:
                 chosen_path = raw_tts_path
         else:
