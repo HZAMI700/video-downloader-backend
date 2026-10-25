@@ -272,7 +272,7 @@ async def convert_media_file(
     input_path = temp_dir / f"conv_in_{uid}_{sanitized}"
 
     clean_fmt = target_format.lower().replace(".", "")
-    if clean_fmt not in {"mp3", "wav", "m4a", "aac", "flac"}:
+    if clean_fmt not in {"mp3", "wav", "m4a", "aac", "flac", "mp4"}:
         clean_fmt = "mp3"
 
     output_path = temp_dir / f"converted_{uid}_{stem}.{clean_fmt}"
@@ -285,6 +285,12 @@ async def convert_media_file(
         if clean_fmt == "wav":
             cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-c:a", "pcm_s16le", str(output_path)]
             media_type = "audio/wav"
+        elif clean_fmt == "mp4":
+            cmd = ["ffmpeg", "-y", "-i", str(input_path), "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output_path)]
+            media_type = "video/mp4"
+        elif clean_fmt == "m4a":
+            cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-c:a", "aac", "-b:a", "192k", str(output_path)]
+            media_type = "audio/mp4"
         else:
             cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, str(output_path)]
             media_type = "audio/mpeg"

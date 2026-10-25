@@ -23,6 +23,83 @@ def get_groq_key() -> str:
     return key
 
 
+async def call_cloudflare_ai(
+    messages: List[Dict[str, str]],
+    model: str = "@cf/meta/llama-3.1-8b-instruct",
+    temperature: float = 0.3
+) -> Optional[str]:
+    """Primary Provider: Cloudflare Workers AI."""
+    token = settings.CLOUDFLARE_API_TOKEN or os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    account_id = settings.CLOUDFLARE_ACCOUNT_ID or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    if not token or not account_id:
+        return None
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "Botkeep-AI/1.0"
+    }
+    payload = {
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": 1500
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(url, headers=headers, json=payload)
+            if res.status_code == 200:
+                data = res.json()
+                if "result" in data and "response" in data["result"]:
+                    return data["result"]["response"].strip()
+            logger.info(f"Cloudflare Workers AI returned status {res.status_code}: {res.text[:120]}")
+    except Exception as e:
+        logger.info(f"Cloudflare Workers AI exception: {e}")
+    return None
+
+
+async def call_opencode_ai(
+    messages: List[Dict[str, str]],
+    model: str = "gemini-3.5-flash-lite",
+    temperature: float = 0.3
+) -> Optional[str]:
+    """Secondary Provider: OpenCode Zen Inference."""
+    key = settings.OPENCODE_API_KEY or os.environ.get("OPENCODE_API_KEY", "")
+    if not key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "User-Agent": "Botkeep-AI/1.0"
+    }
+    models_to_try = [model, "qwen3.8-flash", "mimo-v2.6-flash-free"]
+
+    for m in models_to_try:
+        payload = {
+            "model": m,
+            "messages": messages,
+            "temperature": temperature
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                res = await client.post(
+                    "https://opencode.ai/zen/v1/chat/completions",
+                    headers=headers,
+                    json=payload
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    choices = data.get("choices", [])
+                    if choices and "message" in choices[0]:
+                        return choices[0]["message"]["content"].strip()
+                logger.info(f"OpenCode Zen ({m}) returned status {res.status_code}: {res.text[:120]}")
+        except Exception as e:
+            logger.info(f"OpenCode Zen ({m}) exception: {e}")
+    return None
+
+
 async def call_groq_llm(
     messages: List[Dict[str, str]],
     model: str = "openai/gpt-oss-120b",
@@ -70,6 +147,31 @@ async def call_groq_llm(
     )
 
 
+async def call_ai_chain(
+    messages: List[Dict[str, str]],
+    model: str = "openai/gpt-oss-120b",
+    temperature: float = 0.3,
+    json_mode: bool = False
+) -> str:
+    """Cascading AI caller:
+    1. Cloudflare Workers AI (User-specified primary)
+    2. OpenCode Zen (User-specified secondary)
+    3. Groq (High-speed fallback)
+    """
+    # 1. Primary: Cloudflare
+    cf_res = await call_cloudflare_ai(messages, temperature=temperature)
+    if cf_res:
+        return cf_res
+
+    # 2. Secondary: OpenCode Zen
+    oc_res = await call_opencode_ai(messages, temperature=temperature)
+    if oc_res:
+        return oc_res
+
+    # 3. High-availability fallback: Groq
+    return await call_groq_llm(messages, model=model, temperature=temperature, json_mode=json_mode)
+
+
 # ---------------------------------------------------------
 # 1. PARAPHRASING TOOL
 # ---------------------------------------------------------
@@ -104,7 +206,7 @@ async def paraphrase_text(req: ParaphraseRequest):
         {"role": "user", "content": req.text}
     ]
 
-    result = await call_groq_llm(messages, model="openai/gpt-oss-120b", temperature=0.4)
+    result = await call_ai_chain(messages, model="openai/gpt-oss-120b", temperature=0.4)
 
     return {
         "original_text": req.text,
@@ -146,7 +248,7 @@ async def grammar_check_text(req: GrammarCheckRequest):
         {"role": "user", "content": req.text}
     ]
 
-    raw_json = await call_groq_llm(messages, model="openai/gpt-oss-120b", temperature=0.1, json_mode=True)
+    raw_json = await call_ai_chain(messages, model="openai/gpt-oss-120b", temperature=0.1, json_mode=True)
     try:
         parsed = json.loads(raw_json)
         return {
@@ -195,7 +297,7 @@ async def summarize_text(req: SummarizeRequest):
         {"role": "user", "content": req.text}
     ]
 
-    summary = await call_groq_llm(messages, model="openai/gpt-oss-120b", temperature=0.3)
+    summary = await call_ai_chain(messages, model="openai/gpt-oss-120b", temperature=0.3)
 
     orig_words = len(req.text.split())
     summary_words = len(summary.split())
@@ -237,7 +339,7 @@ async def humanize_text(req: HumanizeRequest):
         {"role": "user", "content": req.text}
     ]
 
-    humanized = await call_groq_llm(messages, model="openai/gpt-oss-120b", temperature=0.7)
+    humanized = await call_ai_chain(messages, model="openai/gpt-oss-120b", temperature=0.7)
 
     return {
         "original_text": req.text,
@@ -273,7 +375,7 @@ async def ai_chat(req: ChatRequest):
     for m in req.messages[-12:]:  # Keep recent context
         formatted.append({"role": m.role, "content": m.content})
 
-    reply = await call_groq_llm(formatted, model="qwen/qwen3.8-27b", temperature=0.5)
+    reply = await call_ai_chain(formatted, model="qwen/qwen3.8-27b", temperature=0.5)
 
     return {
         "reply": reply,
@@ -300,7 +402,7 @@ async def translate(req: TranslateRequest):
         {"role": "system", "content": prompt},
         {"role": "user", "content": req.text}
     ]
-    translated = await call_groq_llm(messages, model="qwen/qwen3.8-27b", temperature=0.2)
+    translated = await call_ai_chain(messages, model="qwen/qwen3.8-27b", temperature=0.2)
     return {
         "original_text": req.text,
         "translated_text": translated,
@@ -343,7 +445,7 @@ async def plagiarism_check(req: PlagiarismRequest):
     ]
 
     try:
-        raw_json = await call_groq_llm(messages, model="openai/gpt-oss-120b", temperature=0.1, json_mode=True)
+        raw_json = await call_ai_chain(messages, model="openai/gpt-oss-120b", temperature=0.1, json_mode=True)
         data = json.loads(raw_json)
         return {
             "original_text": req.text,

@@ -267,8 +267,11 @@ def classify_extraction_error(e: Exception, platform: str, url: str) -> HTTPExce
     if "unsupported url" in msg.lower():
         return HTTPException(status_code=400, detail=f"The URL provided is not a supported {platform} media link.")
 
-    if "instagram sent an empty media response" in msg.lower() or "login_required" in msg.lower():
-        return HTTPException(status_code=403, detail="Instagram requires account authentication to view this post. Please ensure the post is public.")
+    if platform.lower() == "instagram" or "instagram" in msg.lower():
+        return HTTPException(
+            status_code=403,
+            detail="Instagram requires account authentication to download this media. Please ensure the post is public, or provide browser cookies via cookies.txt or COOKIES_TEXT in backend settings. YouTube and TikTok do not require cookies."
+        )
 
     return HTTPException(status_code=400, detail=f"Unable to extract video details from {platform}. The media may be restricted or in an unsupported format.")
 

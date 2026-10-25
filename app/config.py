@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     MAX_TRANSCRIPTION_FILE_SIZE_MB: int = int(os.getenv("MAX_TRANSCRIPTION_FILE_SIZE_MB", "100"))
     MAX_TRANSCRIPTION_DURATION_SECONDS: int = int(os.getenv("MAX_TRANSCRIPTION_DURATION_SECONDS", "3600"))  # 60 min limit
 
+    # AI Section Multi-Provider settings
+    CLOUDFLARE_API_TOKEN: Optional[str] = os.getenv("CLOUDFLARE_API_TOKEN", None)
+    CLOUDFLARE_ACCOUNT_ID: Optional[str] = os.getenv("CLOUDFLARE_ACCOUNT_ID", None)
+    OPENCODE_API_KEY: Optional[str] = os.getenv("OPENCODE_API_KEY", None)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
