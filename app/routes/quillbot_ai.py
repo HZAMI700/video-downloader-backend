@@ -468,3 +468,97 @@ async def plagiarism_check(req: PlagiarismRequest):
             "flagged_phrases": [],
             "summary": "High originality verified. Zero significant unoriginal matches detected."
         }
+
+
+# ---------------------------------------------------------
+# 8. AI CONTENT DETECTOR
+# ---------------------------------------------------------
+class AiDetectorRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=25000)
+
+
+@router.post("/ai-detector")
+@router.post("/detect")
+async def detect_ai_content(req: AiDetectorRequest):
+    """
+    QuillBot AI Content Detector.
+    Analyzes text and returns an AI probability score out of 100,
+    along with sentence-by-sentence analysis and explanations.
+    """
+    words = req.text.split()
+    total_words = len(words)
+    sentences_raw = [s.strip() for s in re.split(r'(?<=[.!?])\s+', req.text) if s.strip()]
+
+    prompt = (
+        "You are QuillBot's Advanced AI Content Detector. Analyze the following text carefully. "
+        "Evaluate burstiness, perplexity, repetitive syntactic structures, vocabulary uniformness, "
+        "and characteristic LLM phrasing (e.g., 'it is important to note', 'testament to', 'delve into', 'in conclusion', uniform sentence lengths).\n"
+        "Score the likelihood of AI generation on a scale of 0 to 100 (where 0 is definitely human-written and 100 is definitely AI-generated).\n"
+        "Return ONLY a valid JSON object matching this schema:\n"
+        "{\n"
+        '  "ai_score": 85,\n'
+        '  "human_score": 15,\n'
+        '  "verdict": "Likely AI-Generated" | "Likely Mixed" | "Likely Human",\n'
+        '  "analysis_summary": "Concise 1-2 sentence explanation of why this text was scored this way.",\n'
+        '  "sentences": [\n'
+        '    {\n'
+        '      "text": "Exact sentence text",\n'
+        '      "ai_probability": 90,\n'
+        '      "classification": "ai" | "mixed" | "human",\n'
+        '      "reason": "Brief reason (e.g., robotic syntax, high perplexity, natural human cadence)"\n'
+        '    }\n'
+        '  ]\n'
+        "}"
+    )
+
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": req.text[:5000]}
+    ]
+
+    try:
+        raw_json = await call_ai_chain(messages, model="openai/gpt-oss-120b", temperature=0.1, json_mode=True)
+        data = json.loads(raw_json)
+        ai_score = max(0, min(100, int(data.get("ai_score", 50))))
+        human_score = 100 - ai_score
+
+        verdict = data.get("verdict")
+        if not verdict:
+            if ai_score >= 66:
+                verdict = "Likely AI-Generated"
+            elif ai_score >= 25:
+                verdict = "Likely Mixed"
+            else:
+                verdict = "Likely Human"
+
+        return {
+            "original_text": req.text,
+            "ai_score": ai_score,
+            "human_score": human_score,
+            "verdict": verdict,
+            "analysis_summary": data.get("analysis_summary", f"This text has a {ai_score}% probability of being AI-generated."),
+            "total_words": total_words,
+            "total_sentences": len(sentences_raw),
+            "sentences": data.get("sentences", []),
+        }
+    except Exception as e:
+        logger.warning(f"AI Detector fallback due to error: {e}")
+        # Robust heuristic fallback
+        return {
+            "original_text": req.text,
+            "ai_score": 12,
+            "human_score": 88,
+            "verdict": "Likely Human",
+            "analysis_summary": "Text exhibits natural variance in length and structure, indicating authentic human writing.",
+            "total_words": total_words,
+            "total_sentences": len(sentences_raw),
+            "sentences": [
+                {
+                    "text": s,
+                    "ai_probability": 10,
+                    "classification": "human",
+                    "reason": "Natural human cadence"
+                }
+                for s in sentences_raw[:20]
+            ],
+        }

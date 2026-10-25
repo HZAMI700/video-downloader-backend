@@ -83,3 +83,18 @@ def test_plagiarism_endpoint():
         assert res.status_code == 200
         data = res.json()
         assert data["originality_percent"] == 97
+
+
+def test_ai_detector_endpoint():
+    with patch("app.routes.quillbot_ai.call_groq_llm", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = '{"ai_score": 88, "human_score": 12, "verdict": "Likely AI-Generated", "analysis_summary": "High presence of uniform syntax.", "sentences": [{"text": "In conclusion, it is vital to acknowledge this paradigm.", "ai_probability": 95, "classification": "ai", "reason": "Robotic transition"}]}'
+        res = client.post(
+            "/api/ai/ai-detector",
+            json={"text": "In conclusion, it is vital to acknowledge this paradigm."}
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["ai_score"] == 88
+        assert data["human_score"] == 12
+        assert data["verdict"] == "Likely AI-Generated"
+        assert len(data["sentences"]) == 1
