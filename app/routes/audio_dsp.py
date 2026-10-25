@@ -309,3 +309,76 @@ async def convert_media_file(
         media_type=media_type,
         filename=f"{stem}.{clean_fmt}"
     )
+
+
+class TtsRequest(BaseModel):
+    text: str
+    lang: Optional[str] = "en"
+    speed: Optional[float] = 1.0
+    pitch: Optional[float] = 1.0
+    voice_id: Optional[str] = None
+
+
+@router.post("/tts")
+async def generate_speech(req: TtsRequest, background_tasks: BackgroundTasks):
+    """
+    Playzy AI Speech & Voice Generator.
+    Converts text to realistic studio MP3 audio using neural TTS synthesis.
+    """
+    clean_text = req.text.strip()
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    clean_lang = (req.lang or "en").split("-")[0].lower()
+    temp_dir = settings.temp_dir_path
+    uid = uuid.uuid4().hex[:8]
+    raw_tts_path = temp_dir / f"tts_raw_{uid}.mp3"
+    final_output_path = temp_dir / f"playzy_speech_{uid}.mp3"
+
+    try:
+        from gtts import gTTS
+        try:
+            tts = gTTS(text=clean_text[:3000], lang=clean_lang, slow=False)
+            tts.save(str(raw_tts_path))
+        except Exception as e:
+            logger.warning(f"gTTS with lang '{clean_lang}' failed: {e}. Falling back to 'en'.")
+            tts = gTTS(text=clean_text[:3000], lang="en", slow=False)
+            tts.save(str(raw_tts_path))
+
+        speed = max(0.5, min(2.0, float(req.speed or 1.0)))
+        pitch = max(0.5, min(1.5, float(req.pitch or 1.0)))
+
+        if (abs(speed - 1.0) > 0.05 or abs(pitch - 1.0) > 0.05) and check_ffmpeg_installed():
+            audio_filters = []
+            if abs(pitch - 1.0) > 0.05:
+                sample_rate = int(24000 * pitch)
+                audio_filters.append(f"asetrate={sample_rate},aresample=24000")
+            if abs(speed - 1.0) > 0.05:
+                audio_filters.append(f"atempo={speed}")
+
+            filter_str = ",".join(audio_filters)
+            cmd = ["ffmpeg", "-y", "-i", str(raw_tts_path), "-af", filter_str, "-b:a", "192k", str(final_output_path)]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+            if proc.returncode == 0 and final_output_path.exists():
+                chosen_path = final_output_path
+            else:
+                chosen_path = raw_tts_path
+        else:
+            chosen_path = raw_tts_path
+
+    except Exception as err:
+        logger.error(f"Speech generation error: {err}")
+        remove_temp_file(raw_tts_path)
+        remove_temp_file(final_output_path)
+        raise HTTPException(status_code=500, detail="Failed to synthesize speech.")
+
+    background_tasks.add_task(remove_temp_file, raw_tts_path)
+    background_tasks.add_task(remove_temp_file, final_output_path)
+
+    return FileResponse(
+        path=chosen_path,
+        media_type="audio/mpeg",
+        filename="playzy_speech.mp3",
+        headers={"Content-Disposition": 'inline; filename="playzy_speech.mp3"'}
+    )
+

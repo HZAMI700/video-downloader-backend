@@ -98,3 +98,14 @@ def test_ai_detector_endpoint():
         assert data["human_score"] == 12
         assert data["verdict"] == "Likely AI-Generated"
         assert len(data["sentences"]) == 1
+
+
+def test_ai_tts_endpoint():
+    res = client.post(
+        "/api/ai/tts",
+        json={"text": "Welcome to Playzy AI speech synthesis.", "lang": "en"}
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "audio/mpeg"
+    assert len(res.content) > 100
+

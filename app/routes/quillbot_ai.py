@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field
 import httpx
 from app.config import settings
 
-logger = logging.getLogger("video_downloader.quillbot_ai")
+logger = logging.getLogger("video_downloader.playzy_ai")
 
-router = APIRouter(prefix="/api/ai", tags=["QuillBot AI Tools"])
+router = APIRouter(prefix="/api/ai", tags=["Playzy AI Tools"])
 
 
 def get_groq_key() -> str:
@@ -194,7 +194,7 @@ async def paraphrase_text(req: ParaphraseRequest):
     instruction = mode_instructions.get(req.mode.lower(), mode_instructions["standard"])
 
     prompt = (
-        f"You are QuillBot's Paraphrasing AI. Your task: {instruction}\n"
+        f"You are Playzy's Paraphrasing AI. Your task: {instruction}\n"
         f"Synonym frequency: {req.synonyms}.\n"
         "Rules:\n"
         "- Return ONLY the paraphrased text.\n"
@@ -226,7 +226,7 @@ class GrammarCheckRequest(BaseModel):
 @router.post("/grammar-check")
 async def grammar_check_text(req: GrammarCheckRequest):
     prompt = (
-        "You are QuillBot's Grammar, Spelling, and Punctuation proofreader. "
+        "You are Playzy's Grammar, Spelling, and Punctuation proofreader. "
         "Analyze the provided text. Fix all spelling errors, grammatical mistakes, subject-verb disagreements, "
         "and punctuation errors. Return ONLY a valid JSON object matching this schema:\n"
         "{\n"
@@ -287,7 +287,7 @@ async def summarize_text(req: SummarizeRequest):
     format_guide = "Use clean bullet points (- point)" if req.format.lower() == "bullets" else "Use a coherent narrative paragraph."
 
     prompt = (
-        f"You are QuillBot's Text Summarizer. {guide} {format_guide}\n"
+        f"You are Playzy's Text Summarizer. {guide} {format_guide}\n"
         "Extract the most crucial information without losing core substance.\n"
         "Return ONLY the summary text without preambles or notes."
     )
@@ -325,7 +325,7 @@ class HumanizeRequest(BaseModel):
 @router.post("/humanize")
 async def humanize_text(req: HumanizeRequest):
     prompt = (
-        "You are QuillBot's AI Humanizer. Transform AI-generated text so that it reads like an authentic, "
+        "You are Playzy's AI Humanizer. Transform AI-generated text so that it reads like an authentic, "
         "thoughtful human wrote it. Specifically:\n"
         "- Remove generic AI clichés ('in conclusion', 'it is important to note', 'testament to', 'delve', 'moreover').\n"
         "- Vary sentence structure and rhythm (mix short punchy lines with descriptive thoughts).\n"
@@ -367,7 +367,7 @@ class ChatRequest(BaseModel):
 @router.post("/chat")
 async def ai_chat(req: ChatRequest):
     system = req.system_prompt or (
-        "You are QuillBot AI Assistant — an intelligent, friendly, and ultra-capable writing, research, "
+        "You are Playzy AI Assistant — an intelligent, friendly, and ultra-capable writing, research, "
         "and coding partner. Answer clearly, provide concise explanations, format with markdown code blocks "
         "and lists where helpful."
     )
@@ -395,7 +395,7 @@ class TranslateRequest(BaseModel):
 @router.post("/translate")
 async def translate(req: TranslateRequest):
     prompt = (
-        f"You are QuillBot's Multilingual Translator. Accurately translate this text into {req.target_language}. "
+        f"You are Playzy's Multilingual Translator. Accurately translate this text into {req.target_language}. "
         "Preserve exact formatting, punctuation, and idioms. Return ONLY the translated text without commentary."
     )
     messages = [
@@ -425,7 +425,7 @@ async def plagiarism_check(req: PlagiarismRequest):
 
     # Scan text characteristics and common n-gram patterns
     prompt = (
-        "You are QuillBot's Plagiarism & Originality Detector. Analyze the following text. "
+        "You are Playzy's Plagiarism & Originality Detector. Analyze the following text. "
         "Identify any commonly published phrases, academic quotes, or generic textbook definitions. "
         "Estimate originality score (0-100%). Return valid JSON:\n"
         "{\n"
@@ -481,7 +481,7 @@ class AiDetectorRequest(BaseModel):
 @router.post("/detect")
 async def detect_ai_content(req: AiDetectorRequest):
     """
-    QuillBot AI Content Detector.
+    Playzy AI Content Detector.
     Analyzes text and returns an AI probability score out of 100,
     along with sentence-by-sentence analysis and explanations.
     """
@@ -490,7 +490,7 @@ async def detect_ai_content(req: AiDetectorRequest):
     sentences_raw = [s.strip() for s in re.split(r'(?<=[.!?])\s+', req.text) if s.strip()]
 
     prompt = (
-        "You are QuillBot's Advanced AI Content Detector. Analyze the following text carefully. "
+        "You are Playzy's Advanced AI Content Detector. Analyze the following text carefully. "
         "Evaluate burstiness, perplexity, repetitive syntactic structures, vocabulary uniformness, "
         "and characteristic LLM phrasing (e.g., 'it is important to note', 'testament to', 'delve into', 'in conclusion', uniform sentence lengths).\n"
         "Score the likelihood of AI generation on a scale of 0 to 100 (where 0 is definitely human-written and 100 is definitely AI-generated).\n"
@@ -562,3 +562,19 @@ async def detect_ai_content(req: AiDetectorRequest):
                 for s in sentences_raw[:20]
             ],
         }
+
+
+# ---------------------------------------------------------
+# 9. AI SPEECH & VOICE GENERATOR (TTS)
+# ---------------------------------------------------------
+from fastapi import BackgroundTasks
+from app.routes.audio_dsp import TtsRequest, generate_speech
+
+@router.post("/tts")
+async def ai_tts(req: TtsRequest, background_tasks: BackgroundTasks):
+    """
+    Playzy AI Voice & Speech Generator endpoint.
+    Synthesizes text into high-fidelity studio MP3 voice.
+    """
+    return await generate_speech(req, background_tasks)
+
