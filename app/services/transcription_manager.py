@@ -163,6 +163,12 @@ class TranscriptionManager:
             "no_warnings": True,
             "socket_timeout": 30,
             "max_filesize": settings.MAX_TRANSCRIPTION_FILE_SIZE_MB * 1024 * 1024,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["web_embedded", "android", "ios", "mweb", "web"],
+                    "player_skip": ["configs"],
+                }
+            }
         }
 
         loop = asyncio.get_running_loop()

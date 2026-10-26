@@ -507,6 +507,14 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
         },
     }
 
+    if detected_platform == "YouTube":
+        ydl_opts["extractor_args"] = {
+            "youtube": {
+                "player_client": ["web_embedded", "android", "ios", "mweb", "web"],
+                "player_skip": ["configs"],
+            }
+        }
+
     cookie_file = find_cookies_file()
     if cookie_file:
         ydl_opts["cookiefile"] = cookie_file
@@ -524,28 +532,44 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(target_extract_url, download=False)
     except Exception as e:
-        logger.warning(f"[{request_id or 'anon'}] yt-dlp extraction failed for {detected_platform} ({target_extract_url}): {e}")
+        logger.warning(f"[{request_id or 'anon'}] yt-dlp primary extraction failed for {detected_platform} ({target_extract_url}): {e}")
 
-        # Universal fallback to Cobalt engine if yt-dlp failed
-        cobalt_data = extract_cobalt_media(target_extract_url) or extract_cobalt_media(resolved_url)
-        if cobalt_data:
-            logger.info(f"[{request_id or 'anon'}] {detected_platform} Cobalt fallback succeeded")
-            return cobalt_data
+        # Dedicated YouTube fallback using pure android/web_embedded client
+        if detected_platform == "YouTube":
+            try:
+                fallback_opts = dict(ydl_opts)
+                fallback_opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": ["android", "web_embedded"],
+                    }
+                }
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(target_extract_url, download=False)
+                logger.info(f"[{request_id or 'anon'}] YouTube Android/Embedded fallback extraction succeeded")
+            except Exception as yt_err:
+                logger.warning(f"[{request_id or 'anon'}] YouTube Android/Embedded fallback failed: {yt_err}")
 
-        # If Facebook fails in yt-dlp and Cobalt, trigger direct HTML scraper fallback
-        if detected_platform == "Facebook":
-            fb_data = extract_facebook_direct_metadata(resolved_url)
-            if fb_data:
-                logger.info(f"[{request_id or 'anon'}] Facebook direct HTML fallback succeeded")
-                return fb_data
+        if not info:
+            # Universal fallback to Cobalt engine if yt-dlp failed
+            cobalt_data = extract_cobalt_media(target_extract_url) or extract_cobalt_media(resolved_url)
+            if cobalt_data:
+                logger.info(f"[{request_id or 'anon'}] {detected_platform} Cobalt fallback succeeded")
+                return cobalt_data
 
-        # If TikTok was bypassed or failed earlier, recheck TikWM
-        if detected_platform == "TikTok":
-            tt_data = extract_tiktok_metadata(resolved_url)
-            if tt_data:
-                return tt_data
+            # If Facebook fails in yt-dlp and Cobalt, trigger direct HTML scraper fallback
+            if detected_platform == "Facebook":
+                fb_data = extract_facebook_direct_metadata(resolved_url)
+                if fb_data:
+                    logger.info(f"[{request_id or 'anon'}] Facebook direct HTML fallback succeeded")
+                    return fb_data
 
-        raise classify_extraction_error(e, detected_platform, resolved_url)
+            # If TikTok was bypassed or failed earlier, recheck TikWM
+            if detected_platform == "TikTok":
+                tt_data = extract_tiktok_metadata(resolved_url)
+                if tt_data:
+                    return tt_data
+
+            raise classify_extraction_error(e, detected_platform, resolved_url)
 
     if not info:
         raise HTTPException(status_code=404, detail=f"No media information found for the requested {detected_platform} URL.")

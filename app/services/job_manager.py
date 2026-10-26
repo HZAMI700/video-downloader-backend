@@ -437,6 +437,14 @@ class JobManager:
                 }
             }
 
+            if job.platform == "YouTube":
+                ydl_opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": ["web_embedded", "android", "ios", "mweb", "web"],
+                        "player_skip": ["configs"],
+                    }
+                }
+
             cookie_file = find_cookies_file()
             if cookie_file:
                 ydl_opts["cookiefile"] = cookie_file
@@ -494,6 +502,38 @@ class JobManager:
             except Exception as e:
                 err_text = str(e)
                 logger.warning(f"Standard yt-dlp download failed for job {job_id} [{job.platform}]: {err_text}")
+
+                # Dedicated YouTube fallback with Android/embedded client
+                if job.platform == "YouTube":
+                    try:
+                        logger.info(f"Attempting YouTube Android client download fallback for job {job_id}...")
+                        yt_fallback_opts = dict(ydl_opts)
+                        yt_fallback_opts["extractor_args"] = {
+                            "youtube": {
+                                "player_client": ["android", "web_embedded"],
+                            }
+                        }
+                        if format_id == "audio_mp3":
+                            yt_fallback_opts["format"] = "bestaudio/best"
+                        else:
+                            yt_fallback_opts["format"] = "best[ext=mp4]/best"
+                        with yt_dlp.YoutubeDL(yt_fallback_opts) as ydl:
+                            ydl.extract_info(target_url, download=True)
+                        matching_files = [f for f in glob.glob(pattern) if not f.endswith((".part", ".ytdl"))]
+                        if matching_files:
+                            final_path = matching_files[0]
+                            job.file_path = final_path
+                            job.file_size = os.path.getsize(final_path)
+                            base_name = os.path.basename(final_path)
+                            clean_name = base_name[len(job_id) + 1:] if base_name.startswith(f"{job_id}_") else base_name
+                            job.filename = sanitize_filename(clean_name, default="downloaded_media")
+                            job.progress_percent = 100.0
+                            job.status = "completed"
+                            job.completed_at = time.time()
+                            logger.info(f"YouTube Android fallback download SUCCESS for job {job_id}")
+                            return
+                    except Exception as yt_fb_err:
+                        logger.warning(f"YouTube Android fallback download failed for job {job_id}: {yt_fb_err}")
 
                 # Universal Fallback: Cobalt Engine if yt-dlp failed during download
                 try:
