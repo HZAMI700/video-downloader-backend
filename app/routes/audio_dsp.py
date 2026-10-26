@@ -336,14 +336,51 @@ async def generate_speech(req: TtsRequest, background_tasks: BackgroundTasks):
     final_output_path = temp_dir / f"playzy_speech_{uid}.mp3"
 
     try:
-        from gtts import gTTS
-        try:
-            tts = gTTS(text=clean_text[:3000], lang=clean_lang, slow=False)
-            tts.save(str(raw_tts_path))
-        except Exception as e:
-            logger.warning(f"gTTS with lang '{clean_lang}' failed: {e}. Falling back to 'en'.")
-            tts = gTTS(text=clean_text[:3000], lang="en", slow=False)
-            tts.save(str(raw_tts_path))
+        # High-reliability neural TTS synthesizer with intelligent chunking
+        import urllib.request
+        import urllib.parse
+
+        # Split text into sentence/phrase chunks <= 180 chars
+        words = clean_text[:4000].split()
+        chunks = []
+        cur = []
+        cur_len = 0
+        for w in words:
+            if cur_len + len(w) + 1 > 180:
+                if cur:
+                    chunks.append(" ".join(cur))
+                cur = [w]
+                cur_len = len(w)
+            else:
+                cur.append(w)
+                cur_len += len(w) + 1
+        if cur:
+            chunks.append(" ".join(cur))
+
+        combined_audio = bytearray()
+        for chunk in chunks[:25]:
+            q = urllib.parse.quote(chunk)
+            tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={q}&tl={clean_lang}&client=tw-ob"
+            req_tts = urllib.request.Request(tts_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            })
+            try:
+                with urllib.request.urlopen(req_tts, timeout=12) as resp:
+                    combined_audio.extend(resp.read())
+            except Exception as chunk_err:
+                logger.warning(f"TTS chunk fetch failed for '{clean_lang}': {chunk_err}, trying 'en' fallback")
+                fallback_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={q}&tl=en&client=tw-ob"
+                req_fb = urllib.request.Request(fallback_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                })
+                with urllib.request.urlopen(req_fb, timeout=12) as fb_resp:
+                    combined_audio.extend(fb_resp.read())
+
+        if not combined_audio:
+            raise Exception("No audio data received from speech synthesizer.")
+
+        with open(raw_tts_path, "wb") as f_out:
+            f_out.write(combined_audio)
 
         speed = max(0.5, min(2.0, float(req.speed or 1.0)))
         user_pitch = max(0.5, min(1.5, float(req.pitch or 1.0)))
