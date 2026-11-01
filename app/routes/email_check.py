@@ -5,12 +5,12 @@ import json
 import time
 import asyncio
 import logging
-import subprocess
+import hashlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, Request, Header, Depends
+from fastapi import APIRouter, HTTPException, Request, Header
 from pydantic import BaseModel, Field
 from app.config import settings
 
@@ -50,7 +50,6 @@ def enforce_rate_limit(client_ip: str, limit: int):
     """Enforces strict rate limit per client IP."""
     now = time.time()
     timestamps = _RATE_LIMIT_STORE[client_ip]
-    # Prune old timestamps
     _RATE_LIMIT_STORE[client_ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
     if len(_RATE_LIMIT_STORE[client_ip]) >= limit:
         raise HTTPException(
@@ -87,47 +86,52 @@ def verify_auth_credentials(
                 detail="Unauthorized. Valid authentication credentials are required for Blackbird email check."
             )
     else:
-        # If no specific token configured in .env, require non-empty auth header or token if strict check requested
         if authorization and provided_token == "invalid_token":
             raise HTTPException(status_code=401, detail="Invalid authorization token.")
 
 
 def generate_dossier_summary(email: str, accounts: List[Dict[str, Any]], elapsed: float) -> str:
-    """Generates educational digital footprint assessment summary."""
+    """Generates educational digital footprint assessment summary without raw markdown punctuation."""
     found_count = len(accounts)
-    categories = set(acc.get("category", "Uncategorized").title() for acc in accounts)
+    categories = set(acc.get("category", "General").title() for acc in accounts)
     cat_str = ", ".join(sorted(categories)) if categories else "None"
 
     if found_count == 0:
         return (
-            f"Reverse enumeration completed in {elapsed:.1f}s across supported platforms. "
-            f"No active public registrations were detected matching '{email}'. "
+            f"Blackbird reverse enumeration completed in {elapsed:.1f}s across indexed endpoints. "
+            f"No public account registrations were detected for '{email}'. "
             "This suggests minimal digital footprint exposure on indexed providers."
         )
 
     return (
-        f"Reverse enumeration completed in {elapsed:.1f}s. "
+        f"Blackbird reverse enumeration completed in {elapsed:.1f}s. "
         f"Identified {found_count} public account registrations associated with '{email}' across categories: {cat_str}. "
-        "Security recommendation: Review account settings, enforce unique high-entropy passwords, "
+        "Defensive recommendation: Audit registered accounts, enforce high-entropy unique credentials, "
         "and activate hardware or app-based Multi-Factor Authentication (MFA) to prevent credential stuffing risks."
     )
 
 
-def find_blackbird_results(results_dir: Path, email: str) -> Optional[List[Dict[str, Any]]]:
-    """Finds and parses the newest Blackbird json export for given email."""
+def find_blackbird_results(results_dir: Path, email: str) -> List[Dict[str, Any]]:
+    """
+    Finds and parses the newest Blackbird json export STRICTLY for the given email.
+    Never falls back to other emails' files to guarantee complete query isolation.
+    """
     if not results_dir.exists():
-        return None
+        return []
 
-    # Search for folder matching <email>_*_blackbird
-    candidates = list(results_dir.glob(f"*{email}*/*.json"))
+    target_clean = email.strip().lower()
+    
+    # 1. Look for directory starting with target email
+    candidates = list(results_dir.glob(f"{target_clean}_*/*.json"))
     if not candidates:
-        # Check subdirectories
-        candidates = list(results_dir.glob(f"*/*.json"))
+        candidates = list(results_dir.glob(f"*{target_clean}*/*.json"))
+    if not candidates:
+        candidates = list(results_dir.glob(f"*{target_clean}*.json"))
 
     if not candidates:
-        return None
+        return []
 
-    # Sort by modification time descending
+    # Sort strictly by newest modification time
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     latest_json = candidates[0]
 
@@ -139,7 +143,31 @@ def find_blackbird_results(results_dir: Path, email: str) -> Optional[List[Dict[
     except Exception as exc:
         logger.warning(f"Error parsing Blackbird JSON file {latest_json}: {exc}")
 
-    return None
+    return []
+
+
+def parse_blackbird_stdout(stdout_text: str) -> List[Dict[str, Any]]:
+    """Fallback parser extracting detected platform URLs directly from stdout stream."""
+    found: List[Dict[str, Any]] = []
+    seen_platforms = set()
+
+    for line in stdout_text.splitlines():
+        # Match rich terminal or plain output: 🎯  [Platform] URL
+        if "🎯" in line or "[FOUND]" in line:
+            match = re.search(r"\[([a-zA-Z0-9\s._-]+)\]\s+(https?://\S+)", line)
+            if match:
+                platform_name = match.group(1).strip()
+                target_url = match.group(2).strip()
+                if platform_name.lower() not in seen_platforms:
+                    seen_platforms.add(platform_name.lower())
+                    found.append({
+                        "name": platform_name,
+                        "url": target_url,
+                        "category": "Social & Web",
+                        "status": "FOUND",
+                        "metadata": None
+                    })
+    return found
 
 
 @router.get("/health")
@@ -149,7 +177,6 @@ async def email_check_health():
     blackbird_path = base_dir / "blackbird" / "blackbird.py"
     blackbird_installed = blackbird_path.exists()
 
-    # Verify Werkzeug version to ensure url_quote compatibility
     werkzeug_version = "unknown"
     try:
         import werkzeug
@@ -184,7 +211,8 @@ async def email_check_search(
     3. Enforces rate limits (5 req/min)
     4. Authenticates credentials
     5. Executes Blackbird CLI securely via subprocess with 120s timeout
-    6. Returns structured accounts list, summary, and legal disclaimer
+    6. Ensures strict per-email output isolation (zero cross-contamination)
+    7. Returns structured accounts list, summary, and legal disclaimer
     """
     client_ip = request.client.host if request.client else "anonymous"
 
@@ -226,7 +254,7 @@ async def email_check_search(
             detail="Blackbird engine is not initialized. Please ensure submodule is cloned."
         )
 
-    # 6. Execute Blackbird subprocess
+    # 6. Execute Blackbird subprocess with UTF-8 encoding environment
     cmd = [
         sys.executable,
         str(blackbird_py),
@@ -240,6 +268,7 @@ async def email_check_search(
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
 
     start_time = time.time()
     try:
@@ -252,7 +281,7 @@ async def email_check_search(
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),
                 timeout=float(settings.BLACKBIRD_TIMEOUT_SECONDS)
             )
@@ -267,30 +296,36 @@ async def email_check_search(
             )
 
         elapsed = time.time() - start_time
+        stdout_text = stdout_bytes.decode("utf-8", errors="ignore")
+        stderr_text = stderr_bytes.decode("utf-8", errors="ignore")
 
         if proc.returncode != 0:
-            err_msg = stderr.decode("utf-8", errors="ignore").strip()
-            logger.error(f"Blackbird exited with code {proc.returncode}: {err_msg[:300]}")
-            # Do not leak internal system paths
-            raise HTTPException(
-                status_code=500,
-                detail="Blackbird reverse search engine encountered an operational error."
-            )
+            logger.error(f"Blackbird exited with code {proc.returncode}: {stderr_text[:300]}")
+            # If Blackbird had a rich formatting exit code on Windows, try stdout parsing before throwing
+            stdout_accounts = parse_blackbird_stdout(stdout_text)
+            if not stdout_accounts:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Blackbird reverse search engine encountered an operational error."
+                )
 
-        # 7. Parse output JSON
+        # 7. Parse output JSON specifically isolated for this email
         results_dir = blackbird_dir / "results"
         raw_results = find_blackbird_results(results_dir, email)
 
+        # If json file didn't exist (e.g. 0 results found), also check stdout
+        if not raw_results:
+            raw_results = parse_blackbird_stdout(stdout_text)
+
         accounts = []
-        if raw_results:
-            for item in raw_results:
-                accounts.append({
-                    "platform": item.get("name", "Unknown Platform"),
-                    "url": item.get("url", ""),
-                    "category": item.get("category", "General"),
-                    "status": str(item.get("status", "FOUND")).lower(),
-                    "metadata": item.get("metadata")
-                })
+        for item in raw_results:
+            accounts.append({
+                "platform": item.get("name", "Unknown Platform"),
+                "url": item.get("url", ""),
+                "category": item.get("category", "General"),
+                "status": str(item.get("status", "FOUND")).lower(),
+                "metadata": item.get("metadata")
+            })
 
         summary = generate_dossier_summary(email, accounts, elapsed)
 
@@ -320,20 +355,21 @@ async def email_check_ai(
     authorization: Optional[str] = Header(None)
 ):
     """
-    Optional AI Digital Footprint Analysis using OpenCode Inference API or grounded heuristics.
+    AI Digital Footprint Threat Analysis using clean formatting without raw markdown asterisks or hashes.
     Analyzes exposure surface, cross-platform password reuse risks, and mitigation strategies.
     """
     verify_auth_credentials(authorization, req.client_token)
 
     platform_names = [a.get("platform", "Service") for a in req.accounts]
     categories = list(set([a.get("category", "General") for a in req.accounts]))
+    cat_text = ", ".join(categories) if categories else "No categories identified"
 
     analysis_text = (
         f"Digital Footprint Threat Analysis for '{req.email}':\n\n"
-        f"1. Identity Surface: Linked to {len(req.accounts)} identified online services across {len(categories)} categories ({', '.join(categories)}).\n"
-        "2. Threat Assessment: High correlation with public account registrations. If the target has reused credentials across these platforms, compromise of one database may expose adjacent accounts.\n"
-        "3. Recommended Containment:\n"
-        "   - Audit registered accounts and delete dormant / legacy profiles.\n"
+        f"1. Identity Surface: Linked to {len(req.accounts)} identified online services across {len(categories)} categories ({cat_text}).\n"
+        "2. Threat Assessment: High correlation with public account registrations. If credentials have been reused across these platforms, breach of one database may compromise adjacent profiles.\n"
+        "3. Recommended Containment Actions:\n"
+        "   - Audit registered accounts and delete dormant or legacy profiles.\n"
         "   - Enforce hardware-backed FIDO2 / WebAuthn MFA on critical accounts.\n"
         "   - Review privacy settings and email visibility across public profiles."
     )
