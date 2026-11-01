@@ -36,10 +36,14 @@ class Settings(BaseSettings):
     MAX_TRANSCRIPTION_FILE_SIZE_MB: int = int(os.getenv("MAX_TRANSCRIPTION_FILE_SIZE_MB", "100"))
     MAX_TRANSCRIPTION_DURATION_SECONDS: int = int(os.getenv("MAX_TRANSCRIPTION_DURATION_SECONDS", "3600"))  # 60 min limit
 
-    # AI Section Multi-Provider settings
+    # AI Section Multi-Provider & Robin OSINT settings
     CLOUDFLARE_API_TOKEN: Optional[str] = os.getenv("CLOUDFLARE_API_TOKEN", None)
     CLOUDFLARE_ACCOUNT_ID: Optional[str] = os.getenv("CLOUDFLARE_ACCOUNT_ID", None)
     OPENCODE_API_KEY: Optional[str] = os.getenv("OPENCODE_API_KEY", None)
+    OPENCODE_BASE_URL: str = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/inference/openai/v1")
+    OPENCODE_MODEL: str = os.getenv("OPENCODE_MODEL", "kimi-k3")
+    TOR_SOCKS_PROXY: str = os.getenv("TOR_SOCKS_PROXY", "socks5h://127.0.0.1:9050")
+    ROBIN_AUTH_SECRET: str = os.getenv("ROBIN_AUTH_SECRET", "robin-botkeep-auth-secret-key-32chars")
 
     model_config = SettingsConfigDict(
         env_file=".env",

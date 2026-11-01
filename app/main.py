@@ -11,6 +11,7 @@ from app.routes.downloads import router as downloads_router
 from app.routes.transcription import router as transcription_router
 from app.routes.audio_dsp import router as audio_dsp_router
 from app.routes.quillbot_ai import router as quillbot_ai_router
+from app.routes.robin import router as robin_router
 from app.services.job_manager import job_manager
 from app.services.transcription_manager import transcription_manager
 from app.security_middleware import SecurityAndRateLimitMiddleware
@@ -87,6 +88,7 @@ app.include_router(downloads_router)
 app.include_router(transcription_router)
 app.include_router(audio_dsp_router)
 app.include_router(quillbot_ai_router)
+app.include_router(robin_router)
 
 
 @app.get("/")
