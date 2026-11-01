@@ -497,6 +497,24 @@ def generate_pivots(query: str, category: str) -> List[str]:
     ]
 
 
+def clean_markdown_text(text: str) -> str:
+    """Completely eradicates raw markdown asterisks, hashes, backticks, and rules."""
+    if not text:
+        return ""
+    # Strip markdown headers (###, ####, #)
+    cleaned = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    # Strip bold/italic tokens: ***word***, **word**, *word*
+    cleaned = re.sub(r"\*{1,3}(.*?)\*{1,3}", r"\1", cleaned)
+    # Strip any stray remaining asterisks
+    cleaned = cleaned.replace("*", "")
+    # Strip backticks
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = cleaned.replace("`", "")
+    # Strip horizontal rules (---, ___, ***)
+    cleaned = re.sub(r"^[-\*_]{3,}\s*$", "", cleaned, flags=re.MULTILINE)
+    return cleaned.strip()
+
+
 def generate_grounded_threat_report(query: str, preset: str, category: str, sources: List[Dict[str, Any]]) -> str:
     """Generates clean, professional threat report without raw markdown asterisks or hashes."""
     if category == "financial":
@@ -829,12 +847,8 @@ async def robin_search_endpoint(req: RobinSearchRequest):
     if not summary or len(summary) < 50:
         summary = generate_grounded_threat_report(req.query, req.preset, category, sources)
     else:
-        # Strip any raw markdown symbols
-        summary = re.sub(r"###+\s*", "", summary)
-        summary = re.sub(r"\*\*([^*]+)\*\*", r"\1", summary)
-        summary = re.sub(r"\*([^*]+)\*", r"\1", summary)
-        summary = re.sub(r"`([^`]+)`", r"\1", summary)
-        summary = re.sub(r"---+", "", summary)
+        # Strip all raw markdown symbols completely
+        summary = clean_markdown_text(summary)
 
     # 5. Tailored Pivots
     pivots = generate_pivots(req.query, category)
@@ -904,10 +918,7 @@ async def robin_followup(req: RobinFollowupRequest):
             f"it is strongly recommended to isolate associated credentials, deploy hardware MFA, and archive evidence for legal and regulatory compliance."
         )
     else:
-        answer = re.sub(r"###+\s*", "", answer)
-        answer = re.sub(r"\*\*([^*]+)\*\*", r"\1", answer)
-        answer = re.sub(r"\*([^*]+)\*", r"\1", answer)
-        answer = re.sub(r"`([^`]+)`", r"\1", answer)
+        answer = clean_markdown_text(answer)
 
     return {
         "question": req.question,

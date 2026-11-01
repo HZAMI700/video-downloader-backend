@@ -15,6 +15,7 @@ import yt_dlp
 from app.config import settings
 from app.security import sanitize_filename, detect_media_platform, resolve_shortlink_url
 from app.services.cobalt_service import extract_cobalt_media
+from app.services.notube_service import convert_youtube_via_notube
 from app.services.ytdlp_service import (
     check_ffmpeg_installed,
     extract_pinterest_metadata,
@@ -122,8 +123,24 @@ def stream_direct_media_to_file(
             final_path = final_img
             job.content_type = "image/jpeg"
         elif is_audio:
-            if not ffmpeg_available:
-                if direct_url.endswith((".mp3", ".m4a", ".aac")) or "audio" in r.headers.get("content-type", ""):
+            disposition = r.headers.get("content-disposition", "").lower()
+            content_type = r.headers.get("content-type", "").lower()
+
+            is_already_mp3 = ".mp3" in disposition or direct_url.endswith(".mp3") or "mpeg" in content_type
+            is_already_wav = ".wav" in disposition or direct_url.endswith(".wav") or "wav" in content_type
+
+            if is_already_mp3:
+                final_mp3 = temp_dir / f"{job.job_id}_{title_sanitized}.mp3"
+                temp_part.replace(final_mp3)
+                final_path = final_mp3
+                job.content_type = "audio/mpeg"
+            elif is_already_wav:
+                final_wav = temp_dir / f"{job.job_id}_{title_sanitized}.wav"
+                temp_part.replace(final_wav)
+                final_path = final_wav
+                job.content_type = "audio/wav"
+            elif not ffmpeg_available:
+                if direct_url.endswith((".mp3", ".m4a", ".aac")) or "audio" in content_type:
                     final_path = temp_dir / f"{job.job_id}_{title_sanitized}.mp3"
                     temp_part.replace(final_path)
                     job.content_type = "audio/mpeg"
@@ -341,6 +358,18 @@ class JobManager:
                                     return
                     except Exception as img_err:
                         logger.warning(f"Instagram photo direct stream failed for {job.job_id}: {img_err}")
+
+            # --- DEDICATED YOUTUBE DOWNLOAD HANDLER (noTube Distributed Engine) ---
+            if job.platform == "YouTube":
+                is_audio = job.format_id.startswith("audio")
+                try:
+                    notube_data = convert_youtube_via_notube(job.url, job.format_id)
+                    if notube_data and notube_data.get("direct_url"):
+                        logger.info(f"YouTube download routing to noTube engine for {job.job_id} ({job.format_id})")
+                        if stream_direct_media_to_file(job, notube_data["direct_url"], notube_data.get("title", "youtube_media"), is_audio, ffmpeg_available, start_time, temp_dir, max_bytes):
+                            return
+                except Exception as nt_err:
+                    logger.warning(f"YouTube noTube engine failed for {job.job_id}: {nt_err}")
 
             # --- STANDARD YT-DLP DOWNLOAD HANDLER (YouTube, TikTok, Facebook, Instagram) ---
             target_url = resolve_shortlink_url(job.url)

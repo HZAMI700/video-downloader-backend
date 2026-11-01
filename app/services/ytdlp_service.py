@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.security import detect_media_platform, resolve_shortlink_url
 from app.services.cobalt_service import extract_cobalt_media
+from app.services.notube_service import extract_youtube_metadata_via_oembed
 
 logger = logging.getLogger("video_downloader.ytdlp")
 
@@ -550,6 +551,13 @@ def extract_media_metadata(url: str, request_id: Optional[str] = None) -> Dict[s
                 logger.warning(f"[{request_id or 'anon'}] YouTube Android/Embedded fallback failed: {yt_err}")
 
         if not info:
+            # YouTube dedicated noTube / oEmbed fallback
+            if detected_platform == "YouTube":
+                yt_oembed_data = extract_youtube_metadata_via_oembed(resolved_url)
+                if yt_oembed_data:
+                    logger.info(f"[{request_id or 'anon'}] YouTube oEmbed fallback succeeded")
+                    return yt_oembed_data
+
             # Universal fallback to Cobalt engine if yt-dlp failed
             cobalt_data = extract_cobalt_media(target_extract_url) or extract_cobalt_media(resolved_url)
             if cobalt_data:
