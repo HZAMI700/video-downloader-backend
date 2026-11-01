@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: botkeep-backend
+    restart: always
+    environment:
+      - SERVER_PORT=8000
+      - HOST=0.0.0.0
+      - FRONTEND_ORIGINS=*
+      - TOR_SOCKS_PROXY=socks5h://tor:9050
+      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
+      - OPENCODE_BASE_URL=${OPENCODE_BASE_URL:-https://opencode.ai/inference/openai/v1}
+      - OPENCODE_MODEL=${OPENCODE_MODEL:-kimi-k3}
+      - BLACKBIRD_ENABLED=true
+      - BLACKBIRD_TIMEOUT_SECONDS=120
+      - BLACKBIRD_RATE_LIMIT_PER_MINUTE=5
+      - BLACKBIRD_AUTH_TOKEN=${BLACKBIRD_AUTH_TOKEN}
+    volumes:
+      - ./downloads_temp:/app/downloads_temp
+      - ./blackbird/results:/app/blackbird/results
+    networks:
+      - app-network
+    depends_on:
+      - tor
+    ports:
+      - "8000:8000"
+
+  tor:
+    image: osminogin/tor-simple:latest
+    container_name: botkeep-tor
+    restart: always
+    networks:
+      - app-network
+    ports:
+      - "127.0.0.1:9050:9050"
+
+networks:
+  app-network:
+    driver: bridge

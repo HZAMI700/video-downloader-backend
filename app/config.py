@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     TOR_SOCKS_PROXY: str = os.getenv("TOR_SOCKS_PROXY", "socks5h://127.0.0.1:9050")
     ROBIN_AUTH_SECRET: str = os.getenv("ROBIN_AUTH_SECRET", "robin-botkeep-auth-secret-key-32chars")
 
+    # Blackbird OSINT Email Checker settings
+    BLACKBIRD_ENABLED: bool = os.getenv("BLACKBIRD_ENABLED", "true").lower() in ("true", "1", "yes")
+    BLACKBIRD_TIMEOUT_SECONDS: int = int(os.getenv("BLACKBIRD_TIMEOUT_SECONDS", "120"))
+    BLACKBIRD_AI_ENABLED: bool = os.getenv("BLACKBIRD_AI_ENABLED", "false").lower() in ("true", "1", "yes")
+    BLACKBIRD_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("BLACKBIRD_RATE_LIMIT_PER_MINUTE", "5"))
+    BLACKBIRD_AUTH_TOKEN: Optional[str] = os.getenv("BLACKBIRD_AUTH_TOKEN", None)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

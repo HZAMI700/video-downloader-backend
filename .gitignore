@@ -17,6 +17,8 @@ ENV/
 downloads_temp/
 *.part
 *.ytdl
+results/
+blackbird/results/
 
 # Testing & logs
 .pytest_cache/

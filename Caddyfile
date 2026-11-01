@@ -1,0 +1,27 @@
+# Caddy reverse proxy with automatic HTTPS
+{$DOMAIN:localhost} {
+    # Encode responses with gzip and zstd
+    encode gzip zstd
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # API endpoints routed to FastAPI Backend
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            transport http {
+                response_header_timeout 150s
+            }
+        }
+    }
+
+    # All other routes to Next.js Frontend
+    handle {
+        reverse_proxy frontend:3000
+    }
+}

@@ -32,7 +32,84 @@ A production-grade, secure media extraction and download API powered by **FastAP
 | `GET` | `/api/transcribe/{job_id}` | Polls transcription progress, stage, detected language, and timestamped segments |
 | `GET` | `/api/transcribe/{job_id}/export` | Exports completed transcript as plain TXT, SRT subtitles, or WebVTT subtitles |
 
+| `POST` | `/api/robin/search` | Robin darknet OSINT investigation via Tor SOCKS5 & OpenCode synthesis |
+| `POST` | `/api/robin/followup` | Grounded follow-up inquiries on retrieved dark web intelligence |
+| `GET` | `/api/robin/health` | Status probe for Tor SOCKS5 circuit & OpenCode Inference API |
+| `POST` | `/api/email-check` | Blackbird OSINT email reverse lookup across 16+ online services |
+| `POST` | `/api/email-check/ai` | AI digital footprint risk assessment and identity exposure matrix |
+| `GET` | `/api/email-check/health` | Health probe for Blackbird CLI engine & dependency readiness |
+
 Interactive Swagger documentation is available at `/docs` and ReDoc at `/redoc`.
+
+---
+
+## 🔍 Blackbird OSINT Email Checker Integration
+
+### Overview / نظرة عامة
+تم دمج أداة **Blackbird OSINT** مفتوحة المصدر (المستودع الرسمي: [https://github.com/antoniaci/blackbird](https://github.com/antoniaci/blackbird)) كخدمة Backend قوية تقوم بالبحث العكسي عن الحسابات المسجلة المرتبطة بأي بريد إلكتروني عبر منصات التواصل والخدمات الرقمية.
+
+### Mandatory Legal Disclaimer / إخلاء مسؤولية قانوني إلزامي
+> [!WARNING]
+> **هذه الميزة مخصصة للتحقيقات القانونية والتعليمية فقط. لا تفحص بريدًا إلكترونيًا دون إذن صريح من صاحبه.**
+> **This feature is strictly intended for authorized legal investigations and educational security research only. Do not scan an email address without explicit permission from its owner.**
+
+### Known Dependency Fix: `Werkzeug==2.2.2`
+> [!IMPORTANT]
+> يعتمد مستودع Blackbird على دوال من مكتبة Werkzeug القديمة. عند تثبيت إصدار أحدث من Werkzeug (3.0+)، يظهر الخطأ:
+> `ImportError: cannot import name 'url_quote' from 'werkzeug.urls'`
+> تم تثبيت وتثبيت الإصدار المتوافق `Werkzeug==2.2.2` داخل متطلبات المشروع و Dockerfile لتفادي هذا الخطأ نهائياً:
+> ```bash
+> pip install Werkzeug==2.2.2
+> ```
+
+### Rate Limiting & Authentication
+- **Rate Limit:** حد أقصى **5 طلبات في الدقيقة** لكل عميل لمنع إساءة الاستخدام.
+- **Authentication:** يدعم حماية المسار عبر `BLACKBIRD_AUTH_TOKEN` (Bearer token أو Basic Auth).
+
+---
+
+## 🚀 VPS Deployment with Docker Compose / النشر على خادم VPS
+
+### 1. Requirements / المتطلبات
+- خادم VPS يعمل بنظام Linux (Ubuntu 22.04 / 24.04 LTS موصى به) مع Docker و Docker Compose مثبتين.
+- **Tor Client Policy Note:** تأكد من مراجعة سياسة مزود الـ VPS (Terms of Service / AUP) للتأكد من سماحهم بتشغيل Tor كعميل SOCKS5 (`Tor Client`) وليس كـ Exit Node. (معظم المزودين مثل Hetzner و DigitalOcean و OVH يسمحون باستخدام Tor كعميل بحث).
+
+### 2. Deployment Steps / خطوات النشر
+1. استنسخ المستودع مع الـ Submodules:
+```bash
+git clone --recursive https://github.com/HZAMI700/video-downloader-backend.git
+cd video-downloader-backend
+```
+إذا كنت قد استنسخت المستودع مسبقاً، حدّث الـ Submodule:
+```bash
+git submodule update --init --recursive
+```
+
+2. أنشئ ملف `.env`:
+```bash
+cp .env.example .env
+nano .env
+```
+عيّن المتغيرات المطلوبة:
+```ini
+OPENCODE_API_KEY=oc_sk_your_key
+TOR_SOCKS_PROXY=socks5h://tor:9050
+BLACKBIRD_ENABLED=true
+BLACKBIRD_TIMEOUT_SECONDS=120
+BLACKBIRD_RATE_LIMIT_PER_MINUTE=5
+```
+
+3. شغّل الخدمات عبر Docker Compose:
+```bash
+docker compose up -d --build
+```
+
+4. تحقق من حالة الخدمات:
+```bash
+docker compose ps
+curl http://localhost:8000/api/email-check/health
+curl http://localhost:8000/api/robin/health
+```
 
 ---
 
