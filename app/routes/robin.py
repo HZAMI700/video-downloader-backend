@@ -1726,41 +1726,84 @@ def verify_and_filter_onion_sources(
     return verified[:max_results]
 
 
-async def call_opencode_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 2500) -> str:
-    """Calls the OpenCode Inference API (OpenAI-compatible) with fallback handling."""
-    api_key = settings.OPENCODE_API_KEY
-    base_url = settings.OPENCODE_BASE_URL.rstrip("/")
-    model = settings.OPENCODE_MODEL
+async def call_cloudflare_chat(messages: List[Dict[str, str]], max_tokens: int = 2500) -> str:
+    """Secondary Provider: Cloudflare Workers AI fallback if OpenCode fails."""
+    token = settings.CLOUDFLARE_API_TOKEN or os.getenv("CLOUDFLARE_API_TOKEN")
+    account_id = settings.CLOUDFLARE_ACCOUNT_ID or os.getenv("CLOUDFLARE_ACCOUNT_ID")
+    model = "@cf/meta/llama-3.1-8b-instruct"
 
-    if not api_key:
-        logger.warning("OPENCODE_API_KEY not configured, using heuristic fallback")
+    if not token or not account_id:
         return ""
 
-    endpoint = f"{base_url}/chat/completions"
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
     headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "User-Agent": "Botkeep-RobinOSINT/1.0"
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
     }
     payload = {
-        "model": model,
         "messages": messages,
-        "temperature": temperature,
         "max_tokens": max_tokens
     }
 
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(endpoint, headers=headers, json=payload)
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code == 200:
                 data = resp.json()
-                choices = data.get("choices", [])
-                if choices:
-                    return choices[0].get("message", {}).get("content", "").strip()
-            return ""
+                res = data.get("result", {})
+                content = res.get("response") or (res.get("choices", [{}])[0].get("message", {}).get("content", ""))
+                if content:
+                    logger.info("Successfully synthesized threat intelligence via Cloudflare Workers AI fallback")
+                    return re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+            else:
+                logger.warning(f"Cloudflare Workers AI returned status {resp.status_code}: {resp.text[:120]}")
     except Exception as exc:
-        logger.error(f"Error calling OpenCode API: {exc}")
-        return ""
+        logger.error(f"Error calling Cloudflare Workers AI fallback: {exc}")
+    return ""
+
+
+async def call_opencode_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 2500) -> str:
+    """Calls the OpenCode Inference API (OpenAI-compatible) with Cloudflare Workers AI fallback."""
+    api_key = settings.OPENCODE_API_KEY
+    base_url = settings.OPENCODE_BASE_URL.rstrip("/")
+    model = settings.OPENCODE_MODEL
+
+    # 1. Primary Provider: OpenCode
+    if api_key:
+        endpoint = f"{base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Botkeep-RobinOSINT/1.0"
+        }
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "").strip()
+                        if content:
+                            return content
+                else:
+                    logger.warning(f"OpenCode API returned HTTP {resp.status_code}, engaging Cloudflare fallback")
+        except Exception as exc:
+            logger.warning(f"OpenCode API error ({exc}), engaging Cloudflare fallback")
+
+    # 2. Secondary Provider: Cloudflare Workers AI
+    cf_res = await call_cloudflare_chat(messages, max_tokens=max_tokens)
+    if cf_res:
+        return cf_res
+
+    return ""
 
 
 @router.get("/health")
