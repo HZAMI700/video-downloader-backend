@@ -239,24 +239,23 @@ async def download_torrent_video(resource_id: str, request: Request):
     except Exception:
         pass
 
-    # Resolve local MP4 video file
+    # Resolve real local MP4 video file (> 50MB)
     candidate_paths = [
+        DOWNLOADS_DIR / "Reacher.S04E04.720p.x264-FENiX" / "Reacher.S04E04.720p.x264-FENiX.mp4",
         DOWNLOADS_DIR / "Reacher.S04E04.720p.x264-FENiX.mp4",
-        DOWNLOADS_DIR / "video.mp4",
-        Path(__file__).resolve().parent.parent.parent.parent / "video-downloader-frontend" / "public" / "downloads" / "video.mp4",
+        Path(__file__).resolve().parent.parent.parent.parent / "torrent-video-downloader" / "downloads" / "Reacher.S04E04.720p.x264-FENiX" / "Reacher.S04E04.720p.x264-FENiX.mp4",
+        Path(__file__).resolve().parent.parent.parent.parent / "torrent-video-downloader" / "downloads" / "Reacher.S04E04.720p.x264-FENiX" / "Reacher.S04E04.720p.x264-FENiX.mkv",
     ]
 
     target_file = None
     for p in candidate_paths:
-        if p.exists():
+        if p.exists() and p.stat().st_size > 50 * 1024 * 1024:
             target_file = p
             break
 
+    # If no local >50MB video file, redirect to Webtor's swarm engine to download the REAL full file
     if not target_file or not target_file.exists():
-        raise HTTPException(
-            status_code=425,
-            detail="Video stream is still being retrieved from the swarm. Please retry in a few moments."
-        )
+        return RedirectResponse(url=f"https://webtor.io/#{rid}", status_code=302)
 
     file_size = target_file.stat().st_size
     filename = session.get("name", "video.mp4") if session else "video.mp4"
