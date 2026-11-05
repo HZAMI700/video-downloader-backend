@@ -14,6 +14,7 @@ from app.routes.quillbot_ai import router as quillbot_ai_router
 from app.routes.robin import router as robin_router
 from app.routes.email_check import router as email_check_router
 from app.routes.torrent_download import router as torrent_download_router
+from app.routes.torrent import router as webtor_torrent_router
 from app.services.job_manager import job_manager
 from app.services.transcription_manager import transcription_manager
 from app.security_middleware import SecurityAndRateLimitMiddleware
@@ -93,6 +94,7 @@ app.include_router(quillbot_ai_router)
 app.include_router(robin_router)
 app.include_router(email_check_router)
 app.include_router(torrent_download_router)
+app.include_router(webtor_torrent_router)
 
 
 @app.get("/")
