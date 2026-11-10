@@ -42,10 +42,17 @@ async def periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure temporary directory exists
+    # Ensure temporary directory exists and clean legacy files
     temp_dir = settings.temp_dir_path
     logger.info(f"Initialized temporary downloads directory at: {temp_dir}")
     logger.info(f"CORS allowed origins: {settings.allowed_origins}")
+
+    # Immediate startup disk cleanup to guarantee Botkeep 2GB storage stays clean
+    try:
+        job_manager.purge_startup_temp()
+        transcription_manager.cleanup_expired()
+    except Exception as e:
+        logger.warning(f"Startup sweep exception: {e}")
 
     # Start cleanup task
     cleanup_task = asyncio.create_task(periodic_cleanup())

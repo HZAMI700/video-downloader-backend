@@ -4,7 +4,14 @@ import uvicorn
 from app.config import settings
 
 if __name__ == "__main__":
-    # Attempt to pull latest changes on startup so Botkeep restarts automatically stay up to date
+    # 1. Startup disk optimization for Botkeep 2GB storage
+    try:
+        # Clear pip wheel cache if present
+        subprocess.run(["pip", "cache", "purge"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except Exception:
+        pass
+
+    # 2. Attempt to pull latest changes on startup so Botkeep restarts automatically stay up to date
     try:
         print("Checking for latest repository updates...")
         subprocess.run(["git", "pull", "origin", "main"], timeout=20)

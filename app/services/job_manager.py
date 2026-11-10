@@ -235,16 +235,65 @@ class JobManager:
         for jid in expired_ids:
             self.delete_job(jid)
 
-        # Also purge any orphan files in temp_dir older than TTL
+        # Purge orphan files older than TTL and enforce strict MAX_TEMP_DIR_SIZE_MB cap
         try:
             temp_dir = settings.temp_dir_path
-            for f in temp_dir.iterdir():
-                if f.is_file():
-                    mtime = f.stat().st_mtime
-                    if now - mtime > settings.DOWNLOAD_TTL_SECONDS:
-                        f.unlink(missing_ok=True)
+            files_info = []
+            total_dir_bytes = 0
+
+            if temp_dir.exists():
+                for f in temp_dir.iterdir():
+                    if f.is_file() and not f.name.startswith("."):
+                        try:
+                            stat = f.stat()
+                            mtime = stat.st_mtime
+                            size = stat.st_size
+                            is_partial = f.suffix in (".part", ".ytdl", ".tmp")
+                            effective_ttl = 120 if is_partial else settings.DOWNLOAD_TTL_SECONDS
+
+                            if now - mtime > effective_ttl:
+                                f.unlink(missing_ok=True)
+                            else:
+                                files_info.append((f, mtime, size))
+                                total_dir_bytes += size
+                        except Exception:
+                            pass
+
+                # Enforce storage cap for Botkeep Free Tier (default 300 MB)
+                max_allowed_bytes = getattr(settings, "MAX_TEMP_DIR_SIZE_MB", 300) * 1024 * 1024
+                if total_dir_bytes > max_allowed_bytes:
+                    files_info.sort(key=lambda x: x[1])  # oldest first
+                    target_bytes = max_allowed_bytes * 0.5
+                    for f, _, size in files_info:
+                        try:
+                            f.unlink(missing_ok=True)
+                            total_dir_bytes -= size
+                            if total_dir_bytes <= target_bytes:
+                                break
+                        except Exception:
+                            pass
         except Exception as e:
             logger.warning(f"Error during temp directory cleanup: {e}")
+
+    def purge_startup_temp(self):
+        """Purge all leftover files on startup to keep Botkeep's 2GB disk clean."""
+        try:
+            temp_dir = settings.temp_dir_path
+            if temp_dir.exists():
+                count = 0
+                freed_bytes = 0
+                for f in temp_dir.iterdir():
+                    if f.is_file() and not f.name.startswith("."):
+                        try:
+                            freed_bytes += f.stat().st_size
+                            f.unlink(missing_ok=True)
+                            count += 1
+                        except Exception:
+                            pass
+                if count > 0:
+                    logger.info(f"Startup disk cleanup: removed {count} orphaned temp files ({round(freed_bytes / (1024*1024), 2)} MB freed)")
+        except Exception as e:
+            logger.warning(f"Error during startup disk purge: {e}")
 
     def execute_download(self, job_id: str):
         """Worker function running in a separate thread."""

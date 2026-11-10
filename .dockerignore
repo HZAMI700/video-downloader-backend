@@ -1,0 +1,41 @@
+# Git files
+.git
+.gitignore
+.gitmodules
+.github
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tests & Documentation
+tests/
+blackbird/docs/
+blackbird/tests/
+blackbird/.github/
+blackbird/.git/
+README.md
+docs/
+scratch/
+
+# Runtime and temporary downloads
+downloads_temp/*
+!downloads_temp/.gitkeep
+downloads/*
+!downloads/.gitkeep
+logs/*
+blackbird/results/*
+blackbird/logs/*
+
+# Local files
+.env
+.env.local
+docker-compose*.yml

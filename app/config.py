@@ -20,11 +20,12 @@ class Settings(BaseSettings):
     # CORS settings: comma-separated list of origins
     FRONTEND_ORIGINS: str = os.getenv("FRONTEND_ORIGINS", "*")
 
-    # Download limits
-    MAX_FILE_SIZE_MB: int = 500
-    DOWNLOAD_TIMEOUT_SECONDS: int = 600
-    DOWNLOAD_TTL_SECONDS: int = 900  # 15 minutes file retention
-    MAX_CONCURRENT_DOWNLOADS: int = 3
+    # Download limits optimized for Botkeep Free Tier (2GB Disk constraint)
+    MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "250"))
+    DOWNLOAD_TIMEOUT_SECONDS: int = int(os.getenv("DOWNLOAD_TIMEOUT_SECONDS", "300"))
+    DOWNLOAD_TTL_SECONDS: int = int(os.getenv("DOWNLOAD_TTL_SECONDS", "180"))  # 3 minutes file retention (was 15 min)
+    MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2"))
+    MAX_TEMP_DIR_SIZE_MB: int = int(os.getenv("MAX_TEMP_DIR_SIZE_MB", "300"))  # Hard storage cap on temp directory
     TEMP_DOWNLOAD_DIR: str = os.getenv("TEMP_DOWNLOAD_DIR", get_default_temp_dir())
 
     # Transcription settings
